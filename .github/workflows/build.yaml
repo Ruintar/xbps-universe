@@ -14,17 +14,25 @@ concurrency:
 
 jobs:
   build:
-    name: Build packages
+    name: Build packages (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: x86_64
+            platform: linux/amd64
+          - arch: aarch64
+            platform: linux/arm64
 
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
-      options: --platform linux/amd64 --privileged
+      options: --platform ${{ matrix.platform }} --privileged
       volumes:
         - /dev:/dev
       env:
-        ARCH: "x86_64"
-        BOOTSTRAP: "x86_64"
+        ARCH: ${{ matrix.arch }}
+        BOOTSTRAP: ${{ matrix.arch }}
 
     env:
       REPO: ${{ github.repository }}
@@ -78,10 +86,14 @@ jobs:
           chown -R builder:builder ~/hostdir
 
           cd void-packages
+          : > /tmp/failed-pkgs.txt
           if [ -s /tmp/pkgs-to-build.txt ]; then
             while read -r pkg; do
-              sudo -Eu builder ./xbps-src -j"$(nproc)" -s -H ~/hostdir pkg "$pkg"
-              find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.xbps" -exec cp {} ~/packages/ \;
+              if sudo -Eu builder ./xbps-src -j"$(nproc)" -s -H ~/hostdir pkg "$pkg"; then
+                find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.xbps" -exec cp {} ~/packages/ \;
+              else
+                echo "$pkg" >> /tmp/failed-pkgs.txt
+              fi
             done < /tmp/pkgs-to-build.txt
           else
             echo "Nada para buildar, todos os pacotes já estão atualizados."
@@ -127,7 +139,7 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p ~/release
-          cp ~/packages/x86_64-repodata ~/release/
+          cp ~/packages/"${ARCH}"-repodata ~/release/
           if [ -s /tmp/pkgs-to-build.txt ]; then
             cp ~/new_packages/* ~/release/ 2>/dev/null || true
             for pkg in $(basename -s .xbps ~/new_packages/*.xbps 2>/dev/null); do
@@ -135,11 +147,32 @@ jobs:
             done
           fi
 
+      - name: Generate build manifest
+        run: |
+          : > ~/manifest-"${ARCH}".txt
+          while read -r line; do
+            pkg=$(echo "$line" | sed -E 's/-[0-9].*$//')
+            ver="${line#${pkg}-}"
+            if grep -qx "$pkg" /tmp/failed-pkgs.txt 2>/dev/null; then
+              status="FAIL"
+            else
+              status="OK"
+            fi
+            echo "${pkg} ${ver} ${status}" >> ~/manifest-"${ARCH}".txt
+          done < /tmp/new_pkgs
+
       - name: Upload built packages
         uses: actions/upload-artifact@v4
         with:
-          name: built-packages
+          name: built-packages-${{ matrix.arch }}
           path: ~/release/
+          retention-days: 1
+
+      - name: Upload build manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-${{ matrix.arch }}
+          path: ~/manifest-${{ matrix.arch }}.txt
           retention-days: 1
 
       - name: Delete existing release assets
@@ -154,17 +187,55 @@ jobs:
                 | xargs -I {} gh release delete-asset latest {} --repo "${REPO}" --yes || true
             done < /tmp/pkgs-to-build.txt
           fi
-          gh release delete-asset latest "x86_64-repodata" --repo "${REPO}" --yes || true
+          gh release delete-asset latest "${ARCH}-repodata" --repo "${REPO}" --yes || true
 
   create-github-release:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download built packages
         uses: actions/download-artifact@v4
         with:
-          name: built-packages
+          pattern: built-packages-*
           path: ~/release/
+          merge-multiple: true
+
+      - name: Download build manifests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-*
+          path: ~/manifests/
+          merge-multiple: true
+
+      - name: Generate PACKAGES.md
+        run: |
+          cat ~/manifests/manifest-*.txt | awk '
+            {
+              pkg=$1; ver=$2; st=$3
+              if (!(pkg in version)) version[pkg]=ver
+              if (st == "FAIL") worst[pkg]="FAIL"
+              else if (!(pkg in worst)) worst[pkg]="OK"
+            }
+            END {
+              for (p in worst) print p
+            }' | sort > /tmp/pkg-order.txt
+
+          {
+            echo "| Package | Version | Status |"
+            echo "|---|---|---|"
+            while read -r pkg; do
+              ver=$(grep -h "^${pkg} " ~/manifests/manifest-*.txt | head -n1 | awk '{ print $2 }')
+              if grep -h "^${pkg} " ~/manifests/manifest-*.txt | awk '{ print $3 }' | grep -qx "FAIL"; then
+                icon="❌"
+              else
+                icon="✅"
+              fi
+              echo "| ${pkg} | ${ver} | ${icon} |"
+            done < /tmp/pkg-order.txt
+          } > PACKAGES.md
 
       - name: Set build timestamp
         id: timestamp
@@ -182,3 +253,9 @@ jobs:
             Latest build of XBPS packages
             Built on: ${{ steps.timestamp.outputs.value }}
           prerelease: false
+
+      - name: Commit PACKAGES.md
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Update PACKAGES.md
+          file_pattern: PACKAGES.md
