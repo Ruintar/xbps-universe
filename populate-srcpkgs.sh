@@ -1,3 +1,5 @@
+#!/bin/sh
+
 set -eu
 
 VOID_PACKAGES_DIR="${VOID_PACKAGES_DIR:-void-packages}"
