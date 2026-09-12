@@ -32,7 +32,6 @@ jobs:
     steps:
       - name: Prepare container
         run: |
-          # troca pro mirror de CI
           mkdir -p /etc/xbps.d && cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
           sed -i 's|repo-default|repo-ci|g' /etc/xbps.d/*-repository-*.conf
           xbps-install -Syu xbps && xbps-install -yu
@@ -65,7 +64,7 @@ jobs:
           chmod +x xbps-universe/changed-packages.sh
           cd void-packages
           export VOID_PACKAGES_DIR="."
-          sudo -Eu builder ../xbps-universe/changed-packages.sh \
+          sudo -Eu builder bash ../xbps-universe/changed-packages.sh \
             "https://github.com/${REPO}/releases/latest/download"
 
       - name: Build changed packages
