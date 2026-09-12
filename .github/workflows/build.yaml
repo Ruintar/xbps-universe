@@ -15,19 +15,19 @@ concurrency:
 jobs:
   build:
     name: Build packages (${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       max-parallel: 1
       matrix:
         include:
           - arch: x86_64
-            platform: linux/amd64
+            runner: ubuntu-latest
           - arch: aarch64
-            platform: linux/arm64
+            runner: ubuntu-24.04-arm
 
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
-      options: --platform ${{ matrix.platform }} --privileged
+      options: --privileged
       volumes:
         - /dev:/dev
       env:
