@@ -1,0 +1,173 @@
+name: Build Packages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 6,18 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build packages
+    runs-on: ubuntu-latest
+
+    container:
+      image: ghcr.io/void-linux/void-glibc-full:latest
+      options: --platform linux/amd64 --privileged
+      volumes:
+        - /dev:/dev
+      env:
+        ARCH: "x86_64"
+        BOOTSTRAP: "x86_64"
+
+    env:
+      REPO: ${{ github.repository }}
+
+    steps:
+      - name: Prepare container
+        run: |
+          # troca pro mirror de CI
+          mkdir -p /etc/xbps.d && cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
+          sed -i 's|repo-default|repo-ci|g' /etc/xbps.d/*-repository-*.conf
+          xbps-install -Syu xbps && xbps-install -yu
+          xbps-install -y sudo bash curl git github-cli
+          useradd -G xbuilder -M builder
+
+      - name: Clone void-packages
+        run: git clone --depth=1 --branch=master https://github.com/void-linux/void-packages
+
+      - name: Clone xbps-universe
+        run: git clone --depth=1 --branch=master "https://github.com/${REPO}" xbps-universe
+
+      - name: Populate srcpkgs
+        run: |
+          chmod +x xbps-universe/populate-srcpkgs.sh
+          VOID_PACKAGES_DIR="void-packages" ./xbps-universe/populate-srcpkgs.sh
+
+      - name: Prepare masterdir
+        run: |
+          cd void-packages
+          sed -i "1i repository=https://github.com/${REPO}/releases/latest/download" \
+            etc/xbps.d/repos-remote.conf
+          chown -R builder:builder . &&
+          sudo -Eu builder common/travis/set_mirror.sh &&
+          sudo -Eu builder common/travis/prepare.sh &&
+          common/travis/fetch-xtools.sh
+
+      - name: Check for changed packages
+        run: |
+          chmod +x xbps-universe/changed-packages.sh
+          cd void-packages
+          export VOID_PACKAGES_DIR="."
+          sudo -Eu builder ../xbps-universe/changed-packages.sh \
+            "https://github.com/${REPO}/releases/latest/download"
+
+      - name: Build changed packages
+        run: |
+          mkdir -p ~/packages ~/hostdir
+          chown -R builder:builder ~/packages
+          chown -R builder:builder ~/hostdir
+
+          cd void-packages
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            while read -r pkg; do
+              sudo -Eu builder ./xbps-src -j"$(nproc)" -s -H ~/hostdir pkg "$pkg"
+              cp ~/hostdir/binpkgs/"${pkg}"-*.xbps ~/packages/
+            done < /tmp/pkgs-to-build.txt
+          else
+            echo "Nada para buildar, todos os pacotes já estão atualizados."
+          fi
+
+      - name: Download the rest of the packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p ~/all_packages
+          gh release download latest --repo "${REPO}" --dir ~/all_packages || true
+
+      - name: Merge packages
+        run: |
+          rm -f ~/all_packages/*.sig2 2>/dev/null || true
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            while read -r pkg; do
+              rm -f ~/all_packages/"${pkg}"-*.xbps
+            done < /tmp/pkgs-to-build.txt
+          fi
+          mkdir -p ~/new_packages
+          cp ~/packages/*.xbps ~/new_packages/ 2>/dev/null || true
+          cp ~/all_packages/*.xbps ~/packages/ 2>/dev/null || true
+
+      - name: Sign and package
+        env:
+          PRIVATE_PEM: ${{ secrets.PRIVATE_PEM }}
+          XBPS_PASSPHRASE: ${{ secrets.PRIVATE_PEM_PASSPHRASE }}
+        run: |
+          cd ~/packages
+          xbps-rindex -a *.xbps
+          temp_key=$(mktemp)
+          echo "$PRIVATE_PEM" > "$temp_key"
+          chmod 600 "$temp_key"
+          xbps-rindex --privkey "$temp_key" --sign --signedby "Ruintar (xbps-universe CI)" ~/packages
+          xbps-rindex --privkey "$temp_key" --sign-pkg ~/packages/*.xbps
+          rm -f "$temp_key"
+
+      - name: Prepare release files
+        run: |
+          mkdir -p ~/release
+          cp ~/packages/x86_64-repodata ~/release/
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            cp ~/new_packages/* ~/release/ 2>/dev/null || true
+            for pkg in $(basename -s .xbps ~/new_packages/*.xbps 2>/dev/null); do
+              cp ~/packages/"$pkg".xbps.sig2 ~/release/ 2>/dev/null || true
+            done
+          fi
+
+      - name: Upload built packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-packages
+          path: ~/release/
+          retention-days: 1
+
+      - name: Delete existing release assets
+        if: hashFiles('/tmp/pkgs-to-build.txt') != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            while read -r pkg; do
+              gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' 2>/dev/null \
+                | grep "^${pkg}-" \
+                | xargs -I {} gh release delete-asset latest {} --repo "${REPO}" --yes || true
+            done < /tmp/pkgs-to-build.txt
+          fi
+          gh release delete-asset latest "x86_64-repodata" --repo "${REPO}" --yes || true
+
+  create-github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download built packages
+        uses: actions/download-artifact@v4
+        with:
+          name: built-packages
+          path: ~/release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: /home/runner/release/*
+          tag_name: latest
+          name: xbps-universe (latest)
+          body: |
+            Latest build of xbps-universe packages
+            Built on: ${{ github.event.repository.updated_at }}
+          prerelease: false
