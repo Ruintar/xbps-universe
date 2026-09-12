@@ -1,4 +1,6 @@
-set -uo pipefail
+#!/usr/bin/env bash
+
+set -u
 
 XBPS_REPO="$1"
 VOID_PACKAGES_DIR="${VOID_PACKAGES_DIR:-void-packages}"
