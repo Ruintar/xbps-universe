@@ -113,8 +113,12 @@ jobs:
         run: |
           cd ~/packages
           xbps-rindex -a *.xbps
+          if [ -z "$PRIVATE_PEM" ]; then
+            echo "PRIVATE_PEM secret está vazio ou não configurado." >&2
+            exit 1
+          fi
           temp_key=$(mktemp)
-          echo "$PRIVATE_PEM" > "$temp_key"
+          printf '%s\n' "$PRIVATE_PEM" > "$temp_key"
           chmod 600 "$temp_key"
           xbps-rindex --privkey "$temp_key" --sign --signedby "Ruintar (xbps-universe CI)" ~/packages
           xbps-rindex --privkey "$temp_key" --sign-pkg ~/packages/*.xbps
@@ -162,6 +166,10 @@ jobs:
           name: built-packages
           path: ~/release/
 
+      - name: Set build timestamp
+        id: timestamp
+        run: echo "value=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         env:
@@ -169,8 +177,8 @@ jobs:
         with:
           files: /home/runner/release/*
           tag_name: latest
-          name: xbps-universe (latest)
+          name: Latest Build
           body: |
-            Latest build of xbps-universe packages
-            Built on: ${{ github.event.repository.updated_at }}
+            Latest build of XBPS packages
+            Built on: ${{ steps.timestamp.outputs.value }}
           prerelease: false
