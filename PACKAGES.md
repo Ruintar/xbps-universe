@@ -7,4 +7,4 @@
 | brave-origin-beta | 1.96.53_1 | ✅ |
 | brave-origin-nightly | 1.97.31_1 | ✅ |
 | vivaldi | 8.2.4133.55+1_1 | ✅ |
-| vivaldi-snapshot | 8.3.4157.3+1_1 | ✅ |
+| vivaldi-snapshot | 8.3.4161.3+1_1 | ✅ |
