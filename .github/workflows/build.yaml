@@ -293,7 +293,7 @@ jobs:
 
           for pkg in $PACKAGES; do
             for arch in $ARCHES; do
-              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt)
+              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt || true)
               if [ "$count" -eq 0 ]; then
                 echo "FALTANDO: ${pkg}.${arch}" >> /tmp/problems.txt
               fi
@@ -365,7 +365,7 @@ jobs:
 
           for pkg in $PACKAGES; do
             for arch in $ARCHES; do
-              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt)
+              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt || true)
               if [ "$count" -eq 0 ]; then
                 echo "FALTANDO: ${pkg}.${arch}" >> /tmp/problems.txt
               fi
