@@ -4,6 +4,7 @@ set -u
 
 XBPS_REPO="$1"
 VOID_PACKAGES_DIR="${VOID_PACKAGES_DIR:-void-packages}"
+FORCE_REBUILD="${FORCE_REBUILD:-false}"
 
 PACKAGES="
 brave
@@ -17,8 +18,13 @@ vivaldi-snapshot
 "
 
 echo "Old pkgs:"
-xbps-query -RsM "*" --repository="$XBPS_REPO" -i 2>/dev/null \
-	| awk '{ print $2 }' | tee /tmp/old_pkgs
+if [ "$FORCE_REBUILD" = "true" ]; then
+	echo "FORCE_REBUILD ativo — ignorando o que já está publicado."
+	: > /tmp/old_pkgs
+else
+	xbps-query -RsM "*" --repository="$XBPS_REPO" -i 2>/dev/null \
+		| awk '{ print $2 }' | tee /tmp/old_pkgs
+fi
 
 echo "New pkgs:"
 : > /tmp/new_pkgs
