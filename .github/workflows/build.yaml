@@ -2,6 +2,11 @@ name: Build Packages
 
 on:
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Ignorar o que já está publicado e reconstruir todos os pacotes (limpa duplicatas acumuladas)
+        type: boolean
+        default: false
   schedule:
     - cron: '30 6,18 * * *'
 
@@ -72,6 +77,8 @@ jobs:
           common/travis/fetch-xtools.sh
 
       - name: Check for changed packages
+        env:
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         run: |
           chmod +x xbps-universe/changed-packages.sh
           cd void-packages
@@ -176,7 +183,6 @@ jobs:
           retention-days: 1
 
       - name: Delete existing release assets
-        if: hashFiles('/tmp/pkgs-to-build.txt') != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -274,3 +280,19 @@ jobs:
         with:
           commit_message: Update PACKAGES.md
           file_pattern: PACKAGES.md
+
+      - name: Verify no duplicate package versions in release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
+            | grep -E '\.xbps$' \
+            | sed -E 's/^(.+)-[0-9][^-]*_[0-9]+\.(x86_64|aarch64)\.xbps$/\1.\2/' \
+            | sort | uniq -d > /tmp/duplicates.txt
+
+          if [ -s /tmp/duplicates.txt ]; then
+            echo "Pacotes com mais de uma versão publicada simultaneamente na release:" >&2
+            cat /tmp/duplicates.txt >&2
+            exit 1
+          fi
+          echo "Nenhuma duplicata encontrada."
