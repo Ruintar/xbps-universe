@@ -192,6 +192,8 @@ jobs:
   create-github-release:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      REPO: ${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -241,18 +243,31 @@ jobs:
         id: timestamp
         run: echo "value=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Create or update release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: /home/runner/release/*
-          tag_name: latest
-          name: Latest Build
-          body: |
-            Latest build of XBPS packages
-            Built on: ${{ steps.timestamp.outputs.value }}
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES="Latest build of XBPS packages
+          Built on: ${{ steps.timestamp.outputs.value }}"
+
+          if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
+            gh release edit latest --repo "${REPO}" --title "Latest Build" --notes "$NOTES"
+          else
+            gh release create latest --repo "${REPO}" --title "Latest Build" --notes "$NOTES"
+          fi
+
+          for f in ~/release/*; do
+            name=$(basename "$f")
+            attempt=1
+            until gh release upload latest "$f" --repo "${REPO}" --clobber; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "Falha ao subir ${name} depois de 5 tentativas" >&2
+                exit 1
+              fi
+              attempt=$((attempt + 1))
+              sleep $((attempt * 15))
+            done
+          done
 
       - name: Commit PACKAGES.md
         uses: stefanzweifel/git-auto-commit-action@v5
