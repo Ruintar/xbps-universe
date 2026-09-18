@@ -111,7 +111,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ~/all_packages
-          gh release download latest --repo "${REPO}" --dir ~/all_packages || true
+          if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
+            attempt=1
+            until gh release download latest --repo "${REPO}" --dir ~/all_packages --clobber; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "Falha ao baixar os pacotes já publicados depois de 5 tentativas" >&2
+                exit 1
+              fi
+              attempt=$((attempt + 1))
+              sleep $((attempt * 15))
+            done
+          else
+            echo "Nenhuma release existente ainda — nada para baixar."
+          fi
 
       - name: Merge packages
         run: |
@@ -281,18 +293,33 @@ jobs:
           commit_message: Update PACKAGES.md
           file_pattern: PACKAGES.md
 
-      - name: Verify no duplicate package versions in release
+      - name: Verify release consistency
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          PACKAGES="brave brave-beta brave-nightly brave-origin brave-origin-beta brave-origin-nightly vivaldi vivaldi-snapshot"
+          ARCHES="x86_64 aarch64"
+
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
             | grep -E '\.xbps$' \
             | sed -E 's/^(.+)-[0-9][^-]*_[0-9]+\.(x86_64|aarch64)\.xbps$/\1.\2/' \
-            | sort | uniq -d > /tmp/duplicates.txt
+            | sort > /tmp/present.txt
 
-          if [ -s /tmp/duplicates.txt ]; then
-            echo "Pacotes com mais de uma versão publicada simultaneamente na release:" >&2
-            cat /tmp/duplicates.txt >&2
+          : > /tmp/problems.txt
+          sort /tmp/present.txt | uniq -d >> /tmp/problems.txt
+
+          for pkg in $PACKAGES; do
+            for arch in $ARCHES; do
+              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt)
+              if [ "$count" -eq 0 ]; then
+                echo "FALTANDO: ${pkg}.${arch}" >> /tmp/problems.txt
+              fi
+            done
+          done
+
+          if [ -s /tmp/problems.txt ]; then
+            echo "Problemas encontrados na release:" >&2
+            cat /tmp/problems.txt >&2
             exit 1
           fi
-          echo "Nenhuma duplicata encontrada."
+          echo "Release consistente: todos os pacotes presentes, sem duplicatas."
