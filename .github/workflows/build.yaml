@@ -130,7 +130,7 @@ jobs:
           rm -f ~/all_packages/*.sig2 2>/dev/null || true
           if [ -s /tmp/pkgs-to-build.txt ]; then
             while read -r pkg; do
-              rm -f ~/all_packages/"${pkg}"-[0-9]*.xbps
+              rm -f ~/all_packages/"${pkg}"-[0-9]*."${ARCH}".xbps
             done < /tmp/pkgs-to-build.txt
           fi
           mkdir -p ~/new_packages
@@ -194,19 +194,6 @@ jobs:
           path: ~/manifest-${{ matrix.arch }}.txt
           retention-days: 1
 
-      - name: Delete existing release assets
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -s /tmp/pkgs-to-build.txt ]; then
-            while read -r pkg; do
-              gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' 2>/dev/null \
-                | grep "^${pkg}-[0-9]" \
-                | xargs -I {} gh release delete-asset latest {} --repo "${REPO}" --yes || true
-            done < /tmp/pkgs-to-build.txt
-          fi
-          gh release delete-asset latest "${ARCH}-repodata" --repo "${REPO}" --yes || true
-
   create-github-release:
     needs: build
     runs-on: ubuntu-latest
@@ -261,6 +248,65 @@ jobs:
         id: timestamp
         run: echo "value=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
 
+      - name: Simulate final state and abort on conflicts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PACKAGES="brave brave-beta brave-nightly brave-origin brave-origin-beta brave-origin-nightly vivaldi vivaldi-snapshot"
+          ARCHES="x86_64 aarch64"
+
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' 2>/dev/null > /tmp/live-assets.txt || : > /tmp/live-assets.txt
+
+          : > /tmp/stale-assets.txt
+          for arch in $ARCHES; do
+            [ -f ~/manifests/manifest-"${arch}".txt ] || continue
+            while read -r pkg ver status; do
+              grep -E "^${pkg}-[0-9].*\.${arch}\.xbps(\.sig2)?$" /tmp/live-assets.txt | while read -r asset; do
+                case "$asset" in
+                  "${pkg}-${ver}.${arch}.xbps"|"${pkg}-${ver}.${arch}.xbps.sig2") ;;
+                  *) echo "$asset" >> /tmp/stale-assets.txt ;;
+                esac
+              done
+            done < ~/manifests/manifest-"${arch}".txt
+          done
+
+          grep -vxFf /tmp/stale-assets.txt /tmp/live-assets.txt > /tmp/simulated-assets.txt 2>/dev/null || cp /tmp/live-assets.txt /tmp/simulated-assets.txt
+          for f in ~/release/*; do
+            name=$(basename "$f")
+            case "$name" in
+              *-repodata)
+                arch="${name%-repodata}"
+                grep -vx "${arch}-repodata" /tmp/simulated-assets.txt > /tmp/sim.tmp || true
+                mv /tmp/sim.tmp /tmp/simulated-assets.txt
+                ;;
+            esac
+            echo "$name" >> /tmp/simulated-assets.txt
+          done
+          sort -u /tmp/simulated-assets.txt -o /tmp/simulated-assets.txt
+
+          grep -E '\.xbps$' /tmp/simulated-assets.txt \
+            | sed -E 's/^(.+)-[0-9][^-]*_[0-9]+\.(x86_64|aarch64)\.xbps$/\1.\2/' \
+            | sort > /tmp/present.txt
+
+          : > /tmp/problems.txt
+          sort /tmp/present.txt | uniq -d >> /tmp/problems.txt
+
+          for pkg in $PACKAGES; do
+            for arch in $ARCHES; do
+              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt)
+              if [ "$count" -eq 0 ]; then
+                echo "FALTANDO: ${pkg}.${arch}" >> /tmp/problems.txt
+              fi
+            done
+          done
+
+          if [ -s /tmp/problems.txt ]; then
+            echo "Simulação encontrou conflitos, abortando antes de tocar na release ao vivo:" >&2
+            cat /tmp/problems.txt >&2
+            exit 1
+          fi
+          echo "Simulação ok, nenhum conflito. Prosseguindo."
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -273,6 +319,15 @@ jobs:
           else
             gh release create latest --repo "${REPO}" --title "Latest Build" --notes "$NOTES"
           fi
+
+          if [ -s /tmp/stale-assets.txt ]; then
+            while read -r name; do
+              gh release delete-asset latest "$name" --repo "${REPO}" --yes || true
+            done < /tmp/stale-assets.txt
+          fi
+          for arch in x86_64 aarch64; do
+            gh release delete-asset latest "${arch}-repodata" --repo "${REPO}" --yes 2>/dev/null || true
+          done
 
           for f in ~/release/*; do
             name=$(basename "$f")
