@@ -4,24 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: Ignorar o que já está publicado e reconstruir todos os pacotes (limpa duplicatas acumuladas)
+        description: "Rebuild all packages, ignoring what is already published"
         type: boolean
         default: false
   schedule:
-    - cron: '30 6,18 * * *'
+    - cron: "30 6,18 * * *"
 
 permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Build packages (${{ matrix.arch }})
+    name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         include:
@@ -29,19 +30,16 @@ jobs:
             runner: ubuntu-latest
           - arch: aarch64
             runner: ubuntu-24.04-arm
-
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
       options: --privileged
       volumes:
         - /dev:/dev
-      env:
-        ARCH: ${{ matrix.arch }}
-        BOOTSTRAP: ${{ matrix.arch }}
-
     env:
+      ARCH: ${{ matrix.arch }}
+      BOOTSTRAP: ${{ matrix.arch }}
       REPO: ${{ github.repository }}
-
+      FORCE_REBUILD: ${{ github.event.inputs.force_rebuild == 'true' && '1' || '0' }}
     steps:
       - name: Prepare container
         run: |
@@ -68,117 +66,202 @@ jobs:
         run: |
           cd void-packages
           if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
-            sed -i "1i repository=https://github.com/${REPO}/releases/latest/download" \
-              etc/xbps.d/repos-remote.conf
+            sed -i "1i repository=https://github.com/${REPO}/releases/latest/download" etc/xbps.d/repos-remote.conf
+          else
+            echo "release latest ainda nao existe, seguindo sem repositorio extra"
           fi
-          chown -R builder:builder . &&
-          sudo -Eu builder common/travis/set_mirror.sh &&
-          sudo -Eu builder common/travis/prepare.sh &&
+          chown -R builder:builder .
+          sudo -Eu builder common/travis/set_mirror.sh
+          sudo -Eu builder common/travis/prepare.sh
           common/travis/fetch-xtools.sh
 
       - name: Check for changed packages
-        env:
-          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         run: |
           chmod +x xbps-universe/changed-packages.sh
           cd void-packages
-          export VOID_PACKAGES_DIR="."
-          sudo -Eu builder bash ../xbps-universe/changed-packages.sh \
+          sudo -Eu builder env VOID_PACKAGES_DIR="." ARCH="${ARCH}" FORCE_REBUILD="${FORCE_REBUILD}" \
+            bash ../xbps-universe/changed-packages.sh \
             "https://github.com/${REPO}/releases/latest/download"
 
       - name: Build changed packages
         run: |
           mkdir -p ~/packages ~/hostdir
-          chown -R builder:builder ~/packages
-          chown -R builder:builder ~/hostdir
-
-          cd void-packages
+          chown -R builder:builder ~/packages ~/hostdir
           : > /tmp/failed-pkgs.txt
+          cd void-packages
           if [ -s /tmp/pkgs-to-build.txt ]; then
             while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
               if sudo -Eu builder ./xbps-src -j"$(nproc)" -s -H ~/hostdir pkg "$pkg"; then
-                find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.xbps" -exec cp {} ~/packages/ \;
+                n=$(find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.${ARCH}.xbps" | wc -l)
+                if [ "$n" -eq 0 ]; then
+                  echo "nenhum binario ${ARCH} encontrado para ${pkg} apos o build"
+                  echo "$pkg" >> /tmp/failed-pkgs.txt
+                else
+                  find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.${ARCH}.xbps" -exec cp {} ~/packages/ \;
+                fi
               else
+                echo "build falhou: ${pkg}"
                 echo "$pkg" >> /tmp/failed-pkgs.txt
               fi
             done < /tmp/pkgs-to-build.txt
           else
-            echo "Nada para buildar, todos os pacotes já estão atualizados."
+            echo "nenhum pacote para buildar nesta execucao"
           fi
+          echo "pacotes buildados: $(ls -1 ~/packages/*."${ARCH}".xbps 2>/dev/null | wc -l)"
+          echo "pacotes com falha: $(wc -l < /tmp/failed-pkgs.txt)"
 
-      - name: Download the rest of the packages
+      - name: Download currently published packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ~/all_packages
-          if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
-            attempt=1
-            until gh release download latest --repo "${REPO}" --dir ~/all_packages --clobber; do
-              if [ "$attempt" -ge 5 ]; then
-                echo "Falha ao baixar os pacotes já publicados depois de 5 tentativas" >&2
-                exit 1
-              fi
-              attempt=$((attempt + 1))
-              sleep $((attempt * 15))
-            done
-          else
-            echo "Nenhuma release existente ainda — nada para baixar."
+          if ! gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
+            echo "release latest ainda nao existe, nada a baixar"
+            exit 0
           fi
+          n=$(gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
+            | grep -cE "\.${ARCH}\.xbps$" || true)
+          if [ "$n" -eq 0 ]; then
+            echo "nenhum asset ${ARCH} publicado ainda"
+            exit 0
+          fi
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            rm -rf ~/all_packages
+            mkdir -p ~/all_packages
+            if gh release download latest --repo "${REPO}" --dir ~/all_packages \
+              --pattern "*.${ARCH}.xbps" --clobber; then
+              ok=1
+              break
+            fi
+            echo "tentativa ${attempt} de download falhou, aguardando"
+            sleep $((attempt * 15))
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "falha ao baixar os assets ja publicados apos 5 tentativas"
+            exit 1
+          fi
+          echo "assets ${ARCH} baixados: $(ls -1 ~/all_packages | wc -l)"
 
-      - name: Merge packages
+      - name: Merge old and new packages
         run: |
-          rm -f ~/all_packages/*.sig2 2>/dev/null || true
+          rm -f ~/all_packages/*.sig2
           if [ -s /tmp/pkgs-to-build.txt ]; then
             while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
+              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then
+                echo "mantendo assets antigos de ${pkg} (build falhou)"
+                continue
+              fi
               rm -f ~/all_packages/"${pkg}"-[0-9]*."${ARCH}".xbps
             done < /tmp/pkgs-to-build.txt
           fi
-          mkdir -p ~/new_packages
-          cp ~/packages/*.xbps ~/new_packages/ 2>/dev/null || true
-          cp ~/all_packages/*.xbps ~/packages/ 2>/dev/null || true
+          cp ~/all_packages/*."${ARCH}".xbps ~/packages/ 2>/dev/null || true
+          echo "total de pacotes ${ARCH} a indexar: $(ls -1 ~/packages/*."${ARCH}".xbps | wc -l)"
 
-      - name: Sign and package
+      - name: Regenerate index and sign
         env:
           PRIVATE_PEM: ${{ secrets.PRIVATE_PEM }}
           XBPS_PASSPHRASE: ${{ secrets.PRIVATE_PEM_PASSPHRASE }}
         run: |
-          cd ~/packages
-          xbps-rindex -a *.xbps
-          if [ -z "$PRIVATE_PEM" ]; then
-            echo "PRIVATE_PEM secret está vazio ou não configurado." >&2
+          if [ -z "${PRIVATE_PEM}" ]; then
+            echo "secret PRIVATE_PEM vazio ou ausente"
             exit 1
           fi
+          cd ~/packages
+          xbps-rindex -a *."${ARCH}".xbps
           temp_key=$(mktemp)
           printf '%s\n' "$PRIVATE_PEM" > "$temp_key"
           chmod 600 "$temp_key"
-          xbps-rindex --privkey "$temp_key" --sign --signedby "Ruintar (xbps-universe CI)" ~/packages
-          xbps-rindex --privkey "$temp_key" --sign-pkg ~/packages/*.xbps
+          xbps-rindex --privkey "$temp_key" --sign --signedby "Ruintar (xbps-universe CI)" .
+          xbps-rindex --privkey "$temp_key" --sign-pkg *."${ARCH}".xbps
           rm -f "$temp_key"
 
-      - name: Prepare release files
+      - name: Prepare release assets and pre-flight validation
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ~/release
           cp ~/packages/"${ARCH}"-repodata ~/release/
           if [ -s /tmp/pkgs-to-build.txt ]; then
-            cp ~/new_packages/* ~/release/ 2>/dev/null || true
-            for pkg in $(basename -s .xbps ~/new_packages/*.xbps 2>/dev/null); do
-              cp ~/packages/"$pkg".xbps.sig2 ~/release/ 2>/dev/null || true
-            done
+            while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
+              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
+              cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps ~/release/ 2>/dev/null || true
+              cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps.sig2 ~/release/ 2>/dev/null || true
+            done < /tmp/pkgs-to-build.txt
           fi
+
+          (cd ~/release && ls -1) > /tmp/new-assets.txt
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
+            > /tmp/current-assets.txt 2>/dev/null || : > /tmp/current-assets.txt
+          cp /tmp/current-assets.txt /tmp/simulated-assets.txt
+
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
+              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
+              grep -vE "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" /tmp/simulated-assets.txt \
+                > /tmp/sim-tmp && mv /tmp/sim-tmp /tmp/simulated-assets.txt
+            done < /tmp/pkgs-to-build.txt
+          fi
+          cat /tmp/new-assets.txt >> /tmp/simulated-assets.txt
+
+          sed 's/-[^-]*$//' /tmp/new_pkgs | sort -u > /tmp/pkg-list.txt
+          rc=0
+          while read -r pkg; do
+            if [ -z "$pkg" ]; then continue; fi
+            count=$(grep -cE "^${pkg}-[0-9].*\.${ARCH}\.xbps$" /tmp/simulated-assets.txt || true)
+            if [ "$count" -gt 1 ]; then
+              echo "duplicata prevista para ${pkg} (${ARCH}):"
+              grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps$" /tmp/simulated-assets.txt
+              rc=1
+            fi
+          done < /tmp/pkg-list.txt
+          if [ "$rc" -ne 0 ]; then
+            echo "pre-voo abortado: haveria mais de uma versao do mesmo pacote/arquitetura na release"
+            exit 1
+          fi
+          echo "pre-voo ok (${ARCH}): nenhuma duplicata prevista"
+
+      - name: Delete stale release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
+            echo "release latest ainda nao existe, nada a remover"
+            exit 0
+          fi
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
+              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
+              for name in $(gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
+                  | grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" \
+                  | grep -vxF -f /tmp/new-assets.txt); do
+                echo "removendo asset obsoleto: ${name}"
+                gh release delete-asset latest "$name" --repo "${REPO}" --yes || true
+              done
+            done < /tmp/pkgs-to-build.txt
+          fi
+          gh release delete-asset latest "${ARCH}-repodata" --repo "${REPO}" --yes || true
 
       - name: Generate build manifest
         run: |
-          : > ~/manifest-"${ARCH}".txt
+          : > ~/manifest.txt
           while read -r line; do
-            pkg=$(echo "$line" | sed -E 's/-[0-9].*$//')
-            ver="${line#${pkg}-}"
-            if grep -qx "$pkg" /tmp/failed-pkgs.txt 2>/dev/null; then
-              status="FAIL"
+            if [ -z "$line" ]; then continue; fi
+            pkg=$(echo "$line" | sed 's/-[^-]*$//')
+            ver=$(echo "$line" | sed "s/^${pkg}-//")
+            if grep -qx "$pkg" /tmp/failed-pkgs.txt; then
+              status=FAIL
             else
-              status="OK"
+              status=OK
             fi
-            echo "${pkg} ${ver} ${status}" >> ~/manifest-"${ARCH}".txt
+            echo "$pkg $ver $status" >> ~/manifest.txt
           done < /tmp/new_pkgs
+          cat ~/manifest.txt
 
       - name: Upload built packages
         uses: actions/upload-artifact@v4
@@ -187,55 +270,135 @@ jobs:
           path: ~/release/
           retention-days: 1
 
-      - name: Upload build manifest
+      - name: Upload manifest
         uses: actions/upload-artifact@v4
         with:
           name: manifest-${{ matrix.arch }}
-          path: ~/manifest-${{ matrix.arch }}.txt
+          path: ~/manifest.txt
           retention-days: 1
 
   create-github-release:
+    name: Publish release
     needs: build
     runs-on: ubuntu-latest
     env:
       REPO: ${{ github.repository }}
     steps:
-      - name: Checkout
+      - name: Checkout xbps-universe
         uses: actions/checkout@v4
 
       - name: Download built packages
         uses: actions/download-artifact@v4
         with:
           pattern: built-packages-*
-          path: ~/release/
+          path: release
           merge-multiple: true
 
-      - name: Download build manifests
+      - name: Download manifests
         uses: actions/download-artifact@v4
         with:
           pattern: manifest-*
-          path: ~/manifests/
+          path: manifests
           merge-multiple: true
+
+      - name: Timestamp
+        id: ts
+        run: echo "value=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="Latest build of XBPS packages
+          Built on: ${{ steps.ts.outputs.value }}"
+          if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
+            gh release edit latest --repo "${REPO}" --title "Latest Build" --notes "$notes"
+          else
+            gh release create latest --repo "${REPO}" --title "Latest Build" --notes "$notes" --latest
+          fi
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=(release/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "nenhum asset para publicar"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            name=$(basename "$f")
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              if gh release upload latest "$f" --repo "${REPO}" --clobber; then
+                ok=1
+                break
+              fi
+              echo "falha ao subir ${name} (tentativa ${attempt}), aguardando"
+              sleep $((attempt * 15))
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "falha definitiva ao subir ${name}"
+              exit 1
+            fi
+            echo "asset publicado: ${name}"
+          done
+
+      - name: Verify release (post-flight)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
+          sed 's/-[^-]*$//' /tmp/pkg-placeholder 2>/dev/null || true
+          awk '{ pkg=$1 } END { }' /dev/null
+          cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-list.txt
+          rc=0
+          while read -r pkg; do
+            if [ -z "$pkg" ]; then continue; fi
+            for arch in x86_64 aarch64; do
+              count=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt || true)
+              sigcount=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps\.sig2$" /tmp/assets.txt || true)
+              if [ "$count" -gt 1 ]; then
+                echo "mais de uma versao de ${pkg} (${arch}) coexistindo na release:"
+                grep -E "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt
+                rc=1
+              elif [ "$count" -eq 0 ]; then
+                if grep -h "^${pkg} " manifests/manifest-*.txt | grep -q FAIL; then
+                  echo "aviso: ${pkg} (${arch}) ausente, build falhou nesta execucao"
+                else
+                  echo "erro: ${pkg} (${arch}) ausente da release"
+                  rc=1
+                fi
+              fi
+              if [ "$sigcount" -ne "$count" ]; then
+                echo "erro: assinaturas divergentes para ${pkg} (${arch}): ${sigcount} sig2 para ${count} pacotes"
+                rc=1
+              fi
+            done
+          done < /tmp/pkg-list.txt
+          for arch in x86_64 aarch64; do
+            if ! grep -qx "${arch}-repodata" /tmp/assets.txt; then
+              echo "erro: ${arch}-repodata ausente da release"
+              rc=1
+            fi
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "pos-voo falhou: a release ficou em estado inconsistente"
+            exit 1
+          fi
+          echo "pos-voo ok: uma versao por pacote/arquitetura, assinaturas e repodata presentes"
 
       - name: Generate PACKAGES.md
         run: |
-          cat ~/manifests/manifest-*.txt | awk '
-            {
-              pkg=$1; ver=$2; st=$3
-              if (!(pkg in version)) version[pkg]=ver
-              if (st == "FAIL") worst[pkg]="FAIL"
-              else if (!(pkg in worst)) worst[pkg]="OK"
-            }
-            END {
-              for (p in worst) print p
-            }' | sort > /tmp/pkg-order.txt
-
+          cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-order.txt
           {
             echo "| Package | Version | Status |"
             echo "|---|---|---|"
             while read -r pkg; do
-              ver=$(grep -h "^${pkg} " ~/manifests/manifest-*.txt | head -n1 | awk '{ print $2 }')
-              if grep -h "^${pkg} " ~/manifests/manifest-*.txt | awk '{ print $3 }' | grep -qx "FAIL"; then
+              if [ -z "$pkg" ]; then continue; fi
+              ver=$(grep -h "^${pkg} " manifests/manifest-*.txt | head -n1 | awk '{ print $2 }')
+              if grep -h "^${pkg} " manifests/manifest-*.txt | awk '{ print $3 }' | grep -qx FAIL; then
                 icon="❌"
               else
                 icon="✅"
@@ -243,138 +406,10 @@ jobs:
               echo "| ${pkg} | ${ver} | ${icon} |"
             done < /tmp/pkg-order.txt
           } > PACKAGES.md
-
-      - name: Set build timestamp
-        id: timestamp
-        run: echo "value=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
-
-      - name: Simulate final state and abort on conflicts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PACKAGES="brave brave-beta brave-nightly brave-origin brave-origin-beta brave-origin-nightly vivaldi vivaldi-snapshot"
-          ARCHES="x86_64 aarch64"
-
-          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' 2>/dev/null > /tmp/live-assets.txt || : > /tmp/live-assets.txt
-
-          : > /tmp/stale-assets.txt
-          for arch in $ARCHES; do
-            [ -f ~/manifests/manifest-"${arch}".txt ] || continue
-            while read -r pkg ver status; do
-              grep -E "^${pkg}-[0-9].*\.${arch}\.xbps(\.sig2)?$" /tmp/live-assets.txt | while read -r asset; do
-                case "$asset" in
-                  "${pkg}-${ver}.${arch}.xbps"|"${pkg}-${ver}.${arch}.xbps.sig2") ;;
-                  *) echo "$asset" >> /tmp/stale-assets.txt ;;
-                esac
-              done
-            done < ~/manifests/manifest-"${arch}".txt
-          done
-
-          grep -vxFf /tmp/stale-assets.txt /tmp/live-assets.txt > /tmp/simulated-assets.txt 2>/dev/null || cp /tmp/live-assets.txt /tmp/simulated-assets.txt
-          for f in ~/release/*; do
-            name=$(basename "$f")
-            case "$name" in
-              *-repodata)
-                arch="${name%-repodata}"
-                grep -vx "${arch}-repodata" /tmp/simulated-assets.txt > /tmp/sim.tmp || true
-                mv /tmp/sim.tmp /tmp/simulated-assets.txt
-                ;;
-            esac
-            echo "$name" >> /tmp/simulated-assets.txt
-          done
-          sort -u /tmp/simulated-assets.txt -o /tmp/simulated-assets.txt
-
-          grep -E '\.xbps$' /tmp/simulated-assets.txt \
-            | sed -E 's/^(.+)-[0-9][^-]*_[0-9]+\.(x86_64|aarch64)\.xbps$/\1.\2/' \
-            | sort > /tmp/present.txt
-
-          : > /tmp/problems.txt
-          sort /tmp/present.txt | uniq -d >> /tmp/problems.txt
-
-          for pkg in $PACKAGES; do
-            for arch in $ARCHES; do
-              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt || true)
-              if [ "$count" -eq 0 ]; then
-                echo "FALTANDO: ${pkg}.${arch}" >> /tmp/problems.txt
-              fi
-            done
-          done
-
-          if [ -s /tmp/problems.txt ]; then
-            echo "Simulação encontrou conflitos, abortando antes de tocar na release ao vivo:" >&2
-            cat /tmp/problems.txt >&2
-            exit 1
-          fi
-          echo "Simulação ok, nenhum conflito. Prosseguindo."
-
-      - name: Create or update release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          NOTES="Latest build of XBPS packages
-          Built on: ${{ steps.timestamp.outputs.value }}"
-
-          if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
-            gh release edit latest --repo "${REPO}" --title "Latest Build" --notes "$NOTES"
-          else
-            gh release create latest --repo "${REPO}" --title "Latest Build" --notes "$NOTES"
-          fi
-
-          if [ -s /tmp/stale-assets.txt ]; then
-            while read -r name; do
-              gh release delete-asset latest "$name" --repo "${REPO}" --yes || true
-            done < /tmp/stale-assets.txt
-          fi
-          for arch in x86_64 aarch64; do
-            gh release delete-asset latest "${arch}-repodata" --repo "${REPO}" --yes 2>/dev/null || true
-          done
-
-          for f in ~/release/*; do
-            name=$(basename "$f")
-            attempt=1
-            until gh release upload latest "$f" --repo "${REPO}" --clobber; do
-              if [ "$attempt" -ge 5 ]; then
-                echo "Falha ao subir ${name} depois de 5 tentativas" >&2
-                exit 1
-              fi
-              attempt=$((attempt + 1))
-              sleep $((attempt * 15))
-            done
-          done
+          cat PACKAGES.md
 
       - name: Commit PACKAGES.md
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: Update PACKAGES.md
+          commit_message: "Update PACKAGES.md"
           file_pattern: PACKAGES.md
-
-      - name: Verify release consistency
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PACKAGES="brave brave-beta brave-nightly brave-origin brave-origin-beta brave-origin-nightly vivaldi vivaldi-snapshot"
-          ARCHES="x86_64 aarch64"
-
-          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
-            | grep -E '\.xbps$' \
-            | sed -E 's/^(.+)-[0-9][^-]*_[0-9]+\.(x86_64|aarch64)\.xbps$/\1.\2/' \
-            | sort > /tmp/present.txt
-
-          : > /tmp/problems.txt
-          sort /tmp/present.txt | uniq -d >> /tmp/problems.txt
-
-          for pkg in $PACKAGES; do
-            for arch in $ARCHES; do
-              count=$(grep -Fxc "${pkg}.${arch}" /tmp/present.txt || true)
-              if [ "$count" -eq 0 ]; then
-                echo "FALTANDO: ${pkg}.${arch}" >> /tmp/problems.txt
-              fi
-            done
-          done
-
-          if [ -s /tmp/problems.txt ]; then
-            echo "Problemas encontrados na release:" >&2
-            cat /tmp/problems.txt >&2
-            exit 1
-          fi
-          echo "Release consistente: todos os pacotes presentes, sem duplicatas."
