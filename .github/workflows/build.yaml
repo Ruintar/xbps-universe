@@ -62,6 +62,14 @@ jobs:
         run: |
           chmod +x xbps-universe/populate-srcpkgs.sh
           VOID_PACKAGES_DIR="void-packages" ./xbps-universe/populate-srcpkgs.sh
+          if ls xbps-universe/common/repo-keys/*.plist >/dev/null 2>&1; then
+            cp xbps-universe/common/repo-keys/*.plist void-packages/common/repo-keys/
+            mkdir -p /var/db/xbps/keys
+            cp xbps-universe/common/repo-keys/*.plist /var/db/xbps/keys/
+            echo "chaves publicas do xbps-universe importadas para o host e para o masterdir"
+          else
+            echo "aviso: nenhum plist em xbps-universe/common/repo-keys, o repo ficara sem chave confiada no host"
+          fi
 
       - name: Prepare masterdir
         env:
@@ -85,6 +93,40 @@ jobs:
           sudo -Eu builder env VOID_PACKAGES_DIR="." ARCH="${ARCH}" FORCE_REBUILD="${FORCE_REBUILD}" \
             bash ../xbps-universe/changed-packages.sh \
             "https://github.com/${REPO}/releases/latest/download"
+
+      - name: Reconcile pending packages with real release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
+            > /tmp/release-assets.txt 2>/dev/null || : > /tmp/release-assets.txt
+
+          : > /tmp/ghost-pkgs.txt
+          while read -r line; do
+            if [ -z "$line" ]; then continue; fi
+            pkg=$(echo "$line" | sed 's/-[^-]*$//')
+            ver=$(echo "$line" | sed "s/^${pkg}-//")
+            if ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps" /tmp/release-assets.txt \
+               || ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps.sig2" /tmp/release-assets.txt; then
+              echo "${pkg}: versao ${ver} nao existe como asset real ${ARCH} na release, forcando rebuild"
+              echo "$pkg" >> /tmp/ghost-pkgs.txt
+            fi
+          done < /tmp/new_pkgs
+
+          if [ -s /tmp/ghost-pkgs.txt ]; then
+            while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
+              if ! grep -qx "$pkg" /tmp/pkgs-to-build.txt; then
+                echo "$pkg" >> /tmp/pkgs-to-build.txt
+              fi
+            done < /tmp/ghost-pkgs.txt
+            echo "pacotes adicionados pela reconciliacao (${ARCH}):"
+            cat /tmp/ghost-pkgs.txt
+          else
+            echo "reconciliacao ok (${ARCH}): todos os templates tem asset real correspondente"
+          fi
+          echo "fila final de build (${ARCH}):"
+          cat /tmp/pkgs-to-build.txt
 
       - name: Check for pending work
         id: check
@@ -125,7 +167,7 @@ jobs:
           else
             echo "nenhum pacote para buildar nesta execucao"
           fi
-          echo "pacotes buildados: $(ls -1 ~/packages/*."${ARCH}".xbps 2>/dev/null | wc -l)"
+          echo "pacotes buildados: $(ls -1 ~/packages/*.${ARCH}.xbps 2>/dev/null | wc -l)"
           echo "pacotes com falha: $(wc -l < /tmp/failed-pkgs.txt)"
 
       - name: Download currently published packages
@@ -209,7 +251,12 @@ jobs:
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
               if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
-              cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps ~/release/ 2>/dev/null || true
+              if ! ls ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps >/dev/null 2>&1; then
+                echo "binario de ${pkg} (${ARCH}) ausente apos o build, marcando como FAIL para proteger o asset publicado"
+                echo "$pkg" >> /tmp/failed-pkgs.txt
+                continue
+              fi
+              cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps ~/release/
               cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps.sig2 ~/release/ 2>/dev/null || true
             done < /tmp/pkgs-to-build.txt
           fi
@@ -448,17 +495,29 @@ jobs:
             exit 1
           fi
           {
-            echo "| Package | Version | Status |"
+            echo "| Package | aarch64 | x86_64 |"
             echo "|---|---|---|"
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
-              ver=$(grep -h "^${pkg} " manifests/manifest-*.txt | head -n1 | awk '{ print $2 }')
-              if grep -h "^${pkg} " manifests/manifest-*.txt | awk '{ print $3 }' | grep -qx FAIL; then
-                icon="❌"
-              else
-                icon="✅"
+              cell_aarch64="-"
+              if grep -q "^${pkg} " manifests/manifest-aarch64.txt 2>/dev/null; then
+                ver=$(grep "^${pkg} " manifests/manifest-aarch64.txt | head -n1 | awk '{ print $2 }')
+                if grep "^${pkg} " manifests/manifest-aarch64.txt | awk '{ print $3 }' | grep -qx FAIL; then
+                  cell_aarch64="❌ ${ver}"
+                else
+                  cell_aarch64="✅ ${ver}"
+                fi
               fi
-              echo "| ${pkg} | ${ver} | ${icon} |"
+              cell_x86_64="-"
+              if grep -q "^${pkg} " manifests/manifest-x86_64.txt 2>/dev/null; then
+                ver=$(grep "^${pkg} " manifests/manifest-x86_64.txt | head -n1 | awk '{ print $2 }')
+                if grep "^${pkg} " manifests/manifest-x86_64.txt | awk '{ print $3 }' | grep -qx FAIL; then
+                  cell_x86_64="❌ ${ver}"
+                else
+                  cell_x86_64="✅ ${ver}"
+                fi
+              fi
+              echo "| ${pkg} | ${cell_aarch64} | ${cell_x86_64} |"
             done < /tmp/pkg-order.txt
           } > PACKAGES.md
           cat PACKAGES.md
