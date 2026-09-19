@@ -30,6 +30,9 @@ jobs:
             runner: ubuntu-latest
           - arch: aarch64
             runner: ubuntu-24.04-arm
+    outputs:
+      skip_x86_64: ${{ steps.check.outputs.skip_x86_64 }}
+      skip_aarch64: ${{ steps.check.outputs.skip_aarch64 }}
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
       options: --privileged
@@ -83,11 +86,25 @@ jobs:
             bash ../xbps-universe/changed-packages.sh \
             "https://github.com/${REPO}/releases/latest/download"
 
+      - name: Check for pending work
+        id: check
+        run: |
+          : > /tmp/failed-pkgs.txt
+          if [ -s /tmp/pkgs-to-build.txt ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "skip_${ARCH}=false" >> "$GITHUB_OUTPUT"
+            echo "ha pacotes para buildar nesta execucao (${ARCH}), fluxo completo"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_${ARCH}=true" >> "$GITHUB_OUTPUT"
+            echo "nada para buildar nesta execucao (${ARCH}), modo leve (skip)"
+          fi
+
       - name: Build changed packages
+        if: steps.check.outputs.skip != 'true'
         run: |
           mkdir -p ~/packages ~/hostdir
           chown -R builder:builder ~/packages ~/hostdir
-          : > /tmp/failed-pkgs.txt
           cd void-packages
           if [ -s /tmp/pkgs-to-build.txt ]; then
             while read -r pkg; do
@@ -112,6 +129,7 @@ jobs:
           echo "pacotes com falha: $(wc -l < /tmp/failed-pkgs.txt)"
 
       - name: Download currently published packages
+        if: steps.check.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -145,6 +163,7 @@ jobs:
           echo "assets ${ARCH} baixados: $(ls -1 ~/all_packages | wc -l)"
 
       - name: Merge old and new packages
+        if: steps.check.outputs.skip != 'true'
         run: |
           rm -f ~/all_packages/*.sig2
           if [ -s /tmp/pkgs-to-build.txt ]; then
@@ -161,6 +180,7 @@ jobs:
           echo "total de pacotes ${ARCH} a indexar: $(ls -1 ~/packages/*."${ARCH}".xbps | wc -l)"
 
       - name: Regenerate index and sign
+        if: steps.check.outputs.skip != 'true'
         env:
           PRIVATE_PEM: ${{ secrets.PRIVATE_PEM }}
           XBPS_PASSPHRASE: ${{ secrets.PRIVATE_PEM_PASSPHRASE }}
@@ -179,6 +199,7 @@ jobs:
           rm -f "$temp_key"
 
       - name: Prepare release assets and pre-flight validation
+        if: steps.check.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -226,6 +247,7 @@ jobs:
           echo "pre-voo ok (${ARCH}): nenhuma duplicata prevista"
 
       - name: Delete stale release assets
+        if: steps.check.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -264,6 +286,7 @@ jobs:
           cat ~/manifest-"${ARCH}".txt
 
       - name: Upload built packages
+        if: steps.check.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: built-packages-${{ matrix.arch }}
@@ -287,7 +310,22 @@ jobs:
       - name: Checkout xbps-universe
         uses: actions/checkout@v4
 
+      - name: Evaluate publish mode
+        id: mode
+        env:
+          SKIP_X86_64: ${{ needs.build.outputs.skip_x86_64 }}
+          SKIP_AARCH64: ${{ needs.build.outputs.skip_aarch64 }}
+        run: |
+          if [ "${SKIP_X86_64}" = "true" ] && [ "${SKIP_AARCH64}" = "true" ]; then
+            echo "full=false" >> "$GITHUB_OUTPUT"
+            echo "modo leve: nada para publicar nesta execucao"
+          else
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "modo completo: ha trabalho para publicar"
+          fi
+
       - name: Download built packages
+        if: steps.mode.outputs.full == 'true'
         uses: actions/download-artifact@v4
         with:
           pattern: built-packages-*
@@ -302,10 +340,12 @@ jobs:
           merge-multiple: true
 
       - name: Timestamp
+        if: steps.mode.outputs.full == 'true'
         id: ts
         run: echo "value=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
 
       - name: Create or update release
+        if: steps.mode.outputs.full == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -318,6 +358,7 @@ jobs:
           fi
 
       - name: Upload release assets
+        if: steps.mode.outputs.full == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
