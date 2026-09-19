@@ -249,7 +249,7 @@ jobs:
 
       - name: Generate build manifest
         run: |
-          : > ~/manifest.txt
+          : > ~/manifest-"${ARCH}".txt
           while read -r line; do
             if [ -z "$line" ]; then continue; fi
             pkg=$(echo "$line" | sed 's/-[^-]*$//')
@@ -259,9 +259,9 @@ jobs:
             else
               status=OK
             fi
-            echo "$pkg $ver $status" >> ~/manifest.txt
+            echo "$pkg $ver $status" >> ~/manifest-"${ARCH}".txt
           done < /tmp/new_pkgs
-          cat ~/manifest.txt
+          cat ~/manifest-"${ARCH}".txt
 
       - name: Upload built packages
         uses: actions/upload-artifact@v4
@@ -274,7 +274,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: manifest-${{ matrix.arch }}
-          path: ~/manifest.txt
+          path: ~/manifest-${{ matrix.arch }}.txt
           retention-days: 1
 
   create-github-release:
@@ -349,10 +349,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          ls manifests/manifest-*.txt >/dev/null 2>&1 || {
+            echo "erro: nenhum manifest encontrado, nao e possivel verificar a release"
+            exit 1
+          }
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
-          sed 's/-[^-]*$//' /tmp/pkg-placeholder 2>/dev/null || true
-          awk '{ pkg=$1 } END { }' /dev/null
           cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-list.txt
+          if [ ! -s /tmp/pkg-list.txt ]; then
+            echo "erro: lista de pacotes vazia, recusando rodar uma verificacao vazia"
+            exit 1
+          fi
           rc=0
           while read -r pkg; do
             if [ -z "$pkg" ]; then continue; fi
@@ -391,7 +397,15 @@ jobs:
 
       - name: Generate PACKAGES.md
         run: |
+          ls manifests/manifest-*.txt >/dev/null 2>&1 || {
+            echo "erro: nenhum manifest encontrado em manifests/"
+            exit 1
+          }
           cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-order.txt
+          if [ ! -s /tmp/pkg-order.txt ]; then
+            echo "erro: lista de pacotes vazia, recusando gerar um PACKAGES.md vazio"
+            exit 1
+          fi
           {
             echo "| Package | Version | Status |"
             echo "|---|---|---|"
