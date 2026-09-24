@@ -5,6 +5,6 @@
 | brave-nightly | ✅ 1.98.18_1 | ✅ 1.98.18_1 |
 | brave-origin | ✅ 1.95.104_1 | ✅ 1.95.104_1 |
 | brave-origin-beta | ✅ 1.97.47_1 | ✅ 1.97.47_1 |
-| brave-origin-nightly | ✅ 1.98.22_1 | ✅ 1.98.22_1 |
+| brave-origin-nightly | ✅ 1.98.28_1 | ✅ 1.98.28_1 |
 | vivaldi | ✅ 8.2.4133.76+1_1 | ✅ 8.2.4133.76+1_1 |
 | vivaldi-snapshot | ✅ 8.3.4161.3+1_1 | ✅ 8.3.4161.3+1_1 |
