@@ -442,15 +442,19 @@ jobs:
             exit 1
           }
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
-          cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-list.txt
-          if [ ! -s /tmp/pkg-list.txt ]; then
-            echo "erro: lista de pacotes vazia, recusando rodar uma verificacao vazia"
+          if [ ! -s /tmp/assets.txt ]; then
+            echo "erro: lista de assets vazia"
             exit 1
           fi
           rc=0
-          while read -r pkg; do
-            if [ -z "$pkg" ]; then continue; fi
-            for arch in x86_64 aarch64; do
+          for arch in x86_64 aarch64; do
+            cut -d' ' -f1 "manifests/manifest-${arch}.txt" | sort -u > "/tmp/pkg-list-${arch}.txt"
+            if [ ! -s "/tmp/pkg-list-${arch}.txt" ]; then
+              echo "erro: lista de pacotes vazia para ${arch}, recusando rodar uma verificacao vazia"
+              exit 1
+            fi
+            while read -r pkg; do
+              if [ -z "$pkg" ]; then continue; fi
               count=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt || true)
               sigcount=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps\.sig2$" /tmp/assets.txt || true)
               if [ "$count" -gt 1 ]; then
@@ -458,7 +462,7 @@ jobs:
                 grep -E "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt
                 rc=1
               elif [ "$count" -eq 0 ]; then
-                if grep -h "^${pkg} " manifests/manifest-*.txt | grep -q FAIL; then
+                if grep -h "^${pkg} " "manifests/manifest-${arch}.txt" | grep -q FAIL; then
                   echo "aviso: ${pkg} (${arch}) ausente, build falhou nesta execucao"
                 else
                   echo "erro: ${pkg} (${arch}) ausente da release"
@@ -469,8 +473,8 @@ jobs:
                 echo "erro: assinaturas divergentes para ${pkg} (${arch}): ${sigcount} sig2 para ${count} pacotes"
                 rc=1
               fi
-            done
-          done < /tmp/pkg-list.txt
+            done < "/tmp/pkg-list-${arch}.txt"
+          done
           for arch in x86_64 aarch64; do
             if ! grep -qx "${arch}-repodata" /tmp/assets.txt; then
               echo "erro: ${arch}-repodata ausente da release"

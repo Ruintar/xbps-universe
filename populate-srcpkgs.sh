@@ -24,3 +24,26 @@ for entry in $REPOS; do
   rm -rf "${VOID_PACKAGES_DIR}/srcpkgs/${name}"
   git clone --quiet --depth=1 -b "$branch" "$url" "${VOID_PACKAGES_DIR}/srcpkgs/${name}"
 done
+
+MULTIREPOS="
+thorium:https://codefloe.com/Ruintar/thorium:master
+"
+
+for entry in $MULTIREPOS; do
+  name=$(echo "$entry" | cut -d: -f1)
+  branch=$(echo "$entry" | rev | cut -d: -f1 | rev)
+  url=$(echo "$entry" | cut -d: -f2-3)
+
+  tmp=$(mktemp -d)
+  git clone --quiet --depth=1 -b "$branch" "$url" "$tmp"
+  for d in "$tmp"/*/; do
+    pkg=$(basename "$d")
+    if [ -f "$d/template" ]; then
+      echo "==> ${pkg} (${branch}, de ${name})"
+      rm -rf "${VOID_PACKAGES_DIR}/srcpkgs/${pkg}"
+      mkdir -p "${VOID_PACKAGES_DIR}/srcpkgs/${pkg}"
+      cp -r "${d}." "${VOID_PACKAGES_DIR}/srcpkgs/${pkg}/"
+    fi
+  done
+  rm -rf "$tmp"
+done

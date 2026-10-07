@@ -15,6 +15,11 @@ brave-origin-beta
 brave-origin-nightly
 vivaldi
 vivaldi-snapshot
+thorium-browser
+thorium-browser-avx2
+thorium-browser-avx512
+thorium-browser-sse4
+thorium-browser-sse3
 "
 
 NEW_PKGS=/tmp/new_pkgs
@@ -28,41 +33,49 @@ CHANGED=/tmp/changed_names
 
 echo "New pkgs:"
 for pkg in $PACKAGES; do
-	tpl="${VOID_PACKAGES_DIR}/srcpkgs/${pkg}/template"
-	if [ ! -f "$tpl" ]; then
-		echo "aviso: template ausente para ${pkg}" >&2
-		continue
-	fi
-	ver=$(grep -m1 '^version=' "$tpl" | cut -d= -f2)
-	rev=$(grep -m1 '^revision=' "$tpl" | cut -d= -f2)
-	rev="${rev:-1}"
-	echo "${pkg}-${ver}_${rev}" | tee -a "$NEW_PKGS"
+    tpl="${VOID_PACKAGES_DIR}/srcpkgs/${pkg}/template"
+    if [ ! -f "$tpl" ]; then
+        echo "aviso: template ausente para ${pkg}" >&2
+        continue
+    fi
+    archs=$(grep -E '^(only_for_)?archs=' "$tpl" | head -n1 | cut -d'"' -f2)
+    if [ -n "$archs" ]; then
+        case " $archs " in
+            *" $ARCH "*) ;;
+            *) echo "pulando ${pkg}: apenas ${archs} (leg atual: ${ARCH})" >&2
+               continue ;;
+        esac
+    fi
+    ver=$(grep -m1 '^version=' "$tpl" | cut -d= -f2)
+    rev=$(grep -m1 '^revision=' "$tpl" | cut -d= -f2)
+    rev="${rev:-1}"
+    echo "${pkg}-${ver}_${rev}" | tee -a "$NEW_PKGS"
 done
 sort -o "$NEW_PKGS" "$NEW_PKGS"
 
 if [ "$FORCE_REBUILD" = "1" ]; then
-	echo "Force rebuild ativo: ignorando por completo o que ja esta publicado (${ARCH})"
+    echo "Force rebuild ativo: ignorando por completo o que ja esta publicado (${ARCH})"
 else
-	echo "Old pkgs (${ARCH}):"
-	xbps-query -RsM "*" --repository="$XBPS_REPO" -i 2>/dev/null \
-		| awk '{ print $2 }' | sort > "$OLD_PKGS" || : > "$OLD_PKGS"
+    echo "Old pkgs (${ARCH}):"
+    xbps-query -RsM "*" --repository="$XBPS_REPO" -i 2>/dev/null \
+        | awk '{ print $2 }' | sort > "$OLD_PKGS" || : > "$OLD_PKGS"
 fi
 
 if [ "$FORCE_REBUILD" = "1" ] || [ ! -s "$OLD_PKGS" ]; then
-	sed 's/-[^-]*$//' "$NEW_PKGS" | sort -u > "$CHANGED"
+    sed 's/-[^-]*$//' "$NEW_PKGS" | sort -u > "$CHANGED"
 else
-	comm -13 "$OLD_PKGS" "$NEW_PKGS" | sed 's/-[^-]*$//' | sort -u > "$CHANGED"
+    comm -13 "$OLD_PKGS" "$NEW_PKGS" | sed 's/-[^-]*$//' | sort -u > "$CHANGED"
 fi
 
 echo "Changed packages:"
 if [ -s "$CHANGED" ]; then
-	if ! xargs -r "${VOID_PACKAGES_DIR}/xbps-src" sort-dependencies < "$CHANGED" > "$TO_BUILD" 2>/tmp/sort-deps.err; then
-		echo "aviso: sort-dependencies falhou, mantendo ordem alfabetica" >&2
-		sort "$CHANGED" > "$TO_BUILD"
-	fi
-	sed 's/^/  /' "$TO_BUILD" >&2
+    if ! xargs -r "${VOID_PACKAGES_DIR}/xbps-src" sort-dependencies < "$CHANGED" > "$TO_BUILD" 2>/tmp/sort-deps.err; then
+        echo "aviso: sort-dependencies falhou, mantendo ordem alfabetica" >&2
+        sort "$CHANGED" > "$TO_BUILD"
+    fi
+    sed 's/^/  /' "$TO_BUILD" >&2
 else
-	echo "  (nenhum)"
+    echo "  (nenhum)"
 fi
 
 echo "Resumo (${ARCH}): $(wc -l < "$TO_BUILD") pacote(s) para buildar"
