@@ -2,10 +2,10 @@
 |---|---|---|
 | brave | ✅ 1.96.61_1 | ✅ 1.96.61_1 |
 | brave-beta | ✅ 1.98.47_1 | ✅ 1.98.47_1 |
-| brave-nightly | ✅ 1.99.16_1 | ✅ 1.99.16_1 |
+| brave-nightly | ✅ 1.99.20_1 | ✅ 1.99.20_1 |
 | brave-origin | ✅ 1.96.61_1 | ✅ 1.96.61_1 |
 | brave-origin-beta | ✅ 1.98.47_1 | ✅ 1.98.47_1 |
-| brave-origin-nightly | ✅ 1.99.16_1 | ✅ 1.99.16_1 |
+| brave-origin-nightly | ✅ 1.99.20_1 | ✅ 1.99.20_1 |
 | thorium-browser | ✅ 154.0.8037.45_1 | ✅ 154.0.8037.45_1 |
 | thorium-browser-avx2 | - | ✅ 154.0.8037.45_1 |
 | thorium-browser-avx512 | - | ✅ 154.0.8037.45_1 |
