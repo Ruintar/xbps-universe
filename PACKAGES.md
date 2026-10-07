@@ -6,5 +6,10 @@
 | brave-origin | ✅ 1.96.61_1 | ✅ 1.96.61_1 |
 | brave-origin-beta | ✅ 1.98.47_1 | ✅ 1.98.47_1 |
 | brave-origin-nightly | ✅ 1.99.16_1 | ✅ 1.99.16_1 |
+| thorium-browser | ✅ 154.0.8037.45_1 | ✅ 154.0.8037.45_1 |
+| thorium-browser-avx2 | - | ✅ 154.0.8037.45_1 |
+| thorium-browser-avx512 | - | ✅ 154.0.8037.45_1 |
+| thorium-browser-sse3 | - | ✅ 154.0.8037.45_1 |
+| thorium-browser-sse4 | - | ✅ 154.0.8037.45_1 |
 | vivaldi | ✅ 8.2.4133.83+1_1 | ✅ 8.2.4133.83+1_1 |
 | vivaldi-snapshot | ✅ 8.3.4175.3+1_1 | ✅ 8.3.4175.3+1_1 |
