@@ -13,6 +13,7 @@ brave-nightly
 brave-origin
 brave-origin-beta
 brave-origin-nightly
+cromite
 helium
 vivaldi
 vivaldi-snapshot
