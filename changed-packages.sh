@@ -15,13 +15,13 @@ brave-origin-beta
 brave-origin-nightly
 cromite
 helium
-vivaldi
-vivaldi-snapshot
 thorium-browser
 thorium-browser-avx2
 thorium-browser-avx512
 thorium-browser-sse4
 thorium-browser-sse3
+vivaldi
+vivaldi-snapshot
 "
 
 NEW_PKGS=/tmp/new_pkgs
