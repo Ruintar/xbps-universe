@@ -6,7 +6,7 @@
 | brave-origin | ✅ 1.97.56_1 | ✅ 1.97.56_1 |
 | brave-origin-beta | ✅ 1.98.55_1 | ✅ 1.98.55_1 |
 | brave-origin-nightly | ✅ 1.99.37_1 | ✅ 1.99.37_1 |
-| cromite-153.0.8010.37 | - | ❌ 11507ac1061b5ea227806f5e84db5a57df6ccf6a_1 |
+| cromite | - | ❌ 153.0.8010.37_1 |
 | helium | ✅ 0.19.2.1_1 | ✅ 0.19.2.1_1 |
 | thorium-browser | ✅ 156.0.8078.28_1 | ✅ 156.0.8078.28_1 |
 | thorium-browser-avx2 | - | ✅ 156.0.8078.28_1 |
