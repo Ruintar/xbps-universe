@@ -11,6 +11,7 @@ brave-nightly:https://codefloe.com/Ruintar/brave-nightly:master
 brave-origin:https://codefloe.com/Ruintar/brave-origin:master
 brave-origin-beta:https://codefloe.com/Ruintar/brave-origin-beta:master
 brave-origin-nightly:https://codefloe.com/Ruintar/brave-origin-nightly:master
+helium:https://codefloe.com/Ruintar/helium:master
 vivaldi:https://codefloe.com/Ruintar/vivaldi:master
 vivaldi-snapshot:https://codefloe.com/Ruintar/vivaldi-snapshot:master
 "

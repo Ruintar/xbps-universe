@@ -13,6 +13,7 @@ brave-nightly
 brave-origin
 brave-origin-beta
 brave-origin-nightly
+helium
 vivaldi
 vivaldi-snapshot
 thorium-browser
