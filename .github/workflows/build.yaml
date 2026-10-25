@@ -66,9 +66,9 @@ jobs:
             cp xbps-universe/common/repo-keys/*.plist void-packages/common/repo-keys/
             mkdir -p /var/db/xbps/keys
             cp xbps-universe/common/repo-keys/*.plist /var/db/xbps/keys/
-            echo "chaves publicas do xbps-universe importadas para o host e para o masterdir"
+            echo "xbps-universe public keys imported to the host and the masterdir"
           else
-            echo "aviso: nenhum plist em xbps-universe/common/repo-keys, o repo ficara sem chave confiada no host"
+            echo "warning: no plist files in xbps-universe/common/repo-keys, the repository will be left without a trusted key on the host"
           fi
 
       - name: Prepare masterdir
@@ -79,7 +79,7 @@ jobs:
           if gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
             sed -i "1i repository=https://github.com/${REPO}/releases/latest/download" etc/xbps.d/repos-remote.conf
           else
-            echo "release latest ainda nao existe, seguindo sem repositorio extra"
+            echo "release latest does not exist yet, continuing without the extra repository"
           fi
           chown -R builder:builder .
           sudo -Eu builder common/travis/set_mirror.sh
@@ -93,6 +93,51 @@ jobs:
           sudo -Eu builder env VOID_PACKAGES_DIR="." ARCH="${ARCH}" FORCE_REBUILD="${FORCE_REBUILD}" \
             bash ../xbps-universe/changed-packages.sh \
             "https://github.com/${REPO}/releases/latest/download"
+
+      - name: Purge release packages no longer in the pipeline (force rebuild only)
+        if: env.FORCE_REBUILD == '1'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -s /tmp/new_pkgs ]; then
+            echo "error: /tmp/new_pkgs is empty, aborting the purge as a safety measure"
+            exit 1
+          fi
+          if ! gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
+            echo "release latest does not exist yet, nothing to purge"
+            exit 0
+          fi
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
+            > /tmp/assets-now.txt
+
+          # Packages known to the pipeline for this arch.
+          # With force rebuild enabled, new_pkgs contains all of them.
+          sed 's/-[^-]*$//' /tmp/new_pkgs | sort -u > /tmp/known-pkgs.txt
+
+          # Orphans: published assets for this arch whose package
+          # is no longer tracked by the pipeline.
+          : > /tmp/orphan-pkgs.txt
+          for name in $(grep -E "\.${ARCH}\.xbps(\.sig2)?$" /tmp/assets-now.txt); do
+            pkg=$(echo "$name" | sed -E "s/\.${ARCH}\.xbps(\.sig2)?$//" | sed 's/-[^-]*$//')
+            if ! grep -qx "$pkg" /tmp/known-pkgs.txt; then
+              grep -qx "$pkg" /tmp/orphan-pkgs.txt || echo "$pkg" >> /tmp/orphan-pkgs.txt
+            fi
+          done
+
+          if [ ! -s /tmp/orphan-pkgs.txt ]; then
+            echo "purge ok (${ARCH}): no orphaned packages in the release"
+            exit 0
+          fi
+
+          echo "purge (${ARCH}): packages in the release no longer tracked by the pipeline:"
+          cat /tmp/orphan-pkgs.txt
+          for pkg in $(cat /tmp/orphan-pkgs.txt); do
+            for name in $(grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" /tmp/assets-now.txt); do
+              echo "deleting orphaned asset: ${name}"
+              gh release delete-asset latest "${name}" --repo "${REPO}" --yes || true
+            done
+          done
+          echo "purge complete (${ARCH}); repodata will be regenerated without these packages"
 
       - name: Reconcile pending packages with real release assets
         env:
@@ -108,7 +153,7 @@ jobs:
             ver=$(echo "$line" | sed "s/^${pkg}-//")
             if ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps" /tmp/release-assets.txt \
                || ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps.sig2" /tmp/release-assets.txt; then
-              echo "${pkg}: versao ${ver} nao existe como asset real ${ARCH} na release, forcando rebuild"
+              echo "${pkg}: version ${ver} does not exist as a real ${ARCH} asset in the release, forcing rebuild"
               echo "$pkg" >> /tmp/ghost-pkgs.txt
             fi
           done < /tmp/new_pkgs
@@ -120,12 +165,12 @@ jobs:
                 echo "$pkg" >> /tmp/pkgs-to-build.txt
               fi
             done < /tmp/ghost-pkgs.txt
-            echo "pacotes adicionados pela reconciliacao (${ARCH}):"
+            echo "packages added by reconciliation (${ARCH}):"
             cat /tmp/ghost-pkgs.txt
           else
-            echo "reconciliacao ok (${ARCH}): todos os templates tem asset real correspondente"
+            echo "reconciliation ok (${ARCH}): every template has a matching real asset"
           fi
-          echo "fila final de build (${ARCH}):"
+          echo "final build queue (${ARCH}):"
           cat /tmp/pkgs-to-build.txt
 
       - name: Check for pending work
@@ -135,11 +180,11 @@ jobs:
           if [ -s /tmp/pkgs-to-build.txt ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "skip_${ARCH}=false" >> "$GITHUB_OUTPUT"
-            echo "ha pacotes para buildar nesta execucao (${ARCH}), fluxo completo"
+            echo "there are packages to build in this run (${ARCH}), full pipeline"
           else
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "skip_${ARCH}=true" >> "$GITHUB_OUTPUT"
-            echo "nada para buildar nesta execucao (${ARCH}), modo leve (skip)"
+            echo "nothing to build in this run (${ARCH}), lightweight mode (skip)"
           fi
 
       - name: Build changed packages
@@ -154,21 +199,21 @@ jobs:
               if sudo -Eu builder ./xbps-src -j"$(nproc)" -s -H ~/hostdir pkg "$pkg"; then
                 n=$(find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.${ARCH}.xbps" | wc -l)
                 if [ "$n" -eq 0 ]; then
-                  echo "nenhum binario ${ARCH} encontrado para ${pkg} apos o build"
+                  echo "no ${ARCH} binary found for ${pkg} after the build"
                   echo "$pkg" >> /tmp/failed-pkgs.txt
                 else
                   find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.${ARCH}.xbps" -exec cp {} ~/packages/ \;
                 fi
               else
-                echo "build falhou: ${pkg}"
+                echo "build failed: ${pkg}"
                 echo "$pkg" >> /tmp/failed-pkgs.txt
               fi
             done < /tmp/pkgs-to-build.txt
           else
-            echo "nenhum pacote para buildar nesta execucao"
+            echo "no packages to build in this run"
           fi
-          echo "pacotes buildados: $(ls -1 ~/packages/*.${ARCH}.xbps 2>/dev/null | wc -l)"
-          echo "pacotes com falha: $(wc -l < /tmp/failed-pkgs.txt)"
+          echo "packages built: $(ls -1 ~/packages/*.${ARCH}.xbps 2>/dev/null | wc -l)"
+          echo "failed packages: $(wc -l < /tmp/failed-pkgs.txt)"
 
       - name: Download currently published packages
         if: steps.check.outputs.skip != 'true'
@@ -177,13 +222,13 @@ jobs:
         run: |
           mkdir -p ~/all_packages
           if ! gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
-            echo "release latest ainda nao existe, nada a baixar"
+            echo "release latest does not exist yet, nothing to download"
             exit 0
           fi
           n=$(gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
             | grep -cE "\.${ARCH}\.xbps$" || true)
           if [ "$n" -eq 0 ]; then
-            echo "nenhum asset ${ARCH} publicado ainda"
+            echo "no ${ARCH} assets published yet"
             exit 0
           fi
           ok=0
@@ -195,14 +240,14 @@ jobs:
               ok=1
               break
             fi
-            echo "tentativa ${attempt} de download falhou, aguardando"
+            echo "download attempt ${attempt} failed, waiting before the next attempt"
             sleep $((attempt * 15))
           done
           if [ "$ok" -ne 1 ]; then
-            echo "falha ao baixar os assets ja publicados apos 5 tentativas"
+            echo "failed to download the published assets after 5 attempts"
             exit 1
           fi
-          echo "assets ${ARCH} baixados: $(ls -1 ~/all_packages | wc -l)"
+          echo "downloaded ${ARCH} assets: $(ls -1 ~/all_packages | wc -l)"
 
       - name: Merge old and new packages
         if: steps.check.outputs.skip != 'true'
@@ -212,14 +257,14 @@ jobs:
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
               if grep -qx "$pkg" /tmp/failed-pkgs.txt; then
-                echo "mantendo assets antigos de ${pkg} (build falhou)"
+                echo "keeping the old assets for ${pkg} (build failed)"
                 continue
               fi
               rm -f ~/all_packages/"${pkg}"-[0-9]*."${ARCH}".xbps
             done < /tmp/pkgs-to-build.txt
           fi
           cp ~/all_packages/*."${ARCH}".xbps ~/packages/ 2>/dev/null || true
-          echo "total de pacotes ${ARCH} a indexar: $(ls -1 ~/packages/*."${ARCH}".xbps | wc -l)"
+          echo "total ${ARCH} packages to index: $(ls -1 ~/packages/*."${ARCH}".xbps | wc -l)"
 
       - name: Regenerate index and sign
         if: steps.check.outputs.skip != 'true'
@@ -228,7 +273,7 @@ jobs:
           XBPS_PASSPHRASE: ${{ secrets.PRIVATE_PEM_PASSPHRASE }}
         run: |
           if [ -z "${PRIVATE_PEM}" ]; then
-            echo "secret PRIVATE_PEM vazio ou ausente"
+            echo "secret PRIVATE_PEM is empty or missing"
             exit 1
           fi
           cd ~/packages
@@ -252,7 +297,7 @@ jobs:
               if [ -z "$pkg" ]; then continue; fi
               if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
               if ! ls ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps >/dev/null 2>&1; then
-                echo "binario de ${pkg} (${ARCH}) ausente apos o build, marcando como FAIL para proteger o asset publicado"
+                echo "${pkg} (${ARCH}) binary missing after the build, marking it as FAIL to protect the published asset"
                 echo "$pkg" >> /tmp/failed-pkgs.txt
                 continue
               fi
@@ -282,16 +327,16 @@ jobs:
             if [ -z "$pkg" ]; then continue; fi
             count=$(grep -cE "^${pkg}-[0-9].*\.${ARCH}\.xbps$" /tmp/simulated-assets.txt || true)
             if [ "$count" -gt 1 ]; then
-              echo "duplicata prevista para ${pkg} (${ARCH}):"
+              echo "a duplicate would be created for ${pkg} (${ARCH}):"
               grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps$" /tmp/simulated-assets.txt
               rc=1
             fi
           done < /tmp/pkg-list.txt
           if [ "$rc" -ne 0 ]; then
-            echo "pre-voo abortado: haveria mais de uma versao do mesmo pacote/arquitetura na release"
+            echo "pre-flight aborted: the release would end up with more than one version of the same package/architecture"
             exit 1
           fi
-          echo "pre-voo ok (${ARCH}): nenhuma duplicata prevista"
+          echo "pre-flight ok (${ARCH}): no duplicates predicted"
 
       - name: Delete stale release assets
         if: steps.check.outputs.skip != 'true'
@@ -299,7 +344,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ! gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
-            echo "release latest ainda nao existe, nada a remover"
+            echo "release latest does not exist yet, nothing to remove"
             exit 0
           fi
           if [ -s /tmp/pkgs-to-build.txt ]; then
@@ -309,7 +354,7 @@ jobs:
               for name in $(gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
                   | grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" \
                   | grep -vxF -f /tmp/new-assets.txt); do
-                echo "removendo asset obsoleto: ${name}"
+                echo "deleting stale asset: ${name}"
                 gh release delete-asset latest "$name" --repo "${REPO}" --yes || true
               done
             done < /tmp/pkgs-to-build.txt
@@ -334,14 +379,14 @@ jobs:
 
       - name: Upload built packages
         if: steps.check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: built-packages-${{ matrix.arch }}
           path: ~/release/
           retention-days: 1
 
       - name: Upload manifest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: manifest-${{ matrix.arch }}
           path: ~/manifest-${{ matrix.arch }}.txt
@@ -355,7 +400,7 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Checkout xbps-universe
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Evaluate publish mode
         id: mode
@@ -365,22 +410,22 @@ jobs:
         run: |
           if [ "${SKIP_X86_64}" = "true" ] && [ "${SKIP_AARCH64}" = "true" ]; then
             echo "full=false" >> "$GITHUB_OUTPUT"
-            echo "modo leve: nada para publicar nesta execucao"
+            echo "lightweight mode: nothing to publish in this run"
           else
             echo "full=true" >> "$GITHUB_OUTPUT"
-            echo "modo completo: ha trabalho para publicar"
+            echo "full mode: there is work to publish"
           fi
 
       - name: Download built packages
         if: steps.mode.outputs.full == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: built-packages-*
           path: release
           merge-multiple: true
 
       - name: Download manifests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: manifest-*
           path: manifests
@@ -412,7 +457,7 @@ jobs:
           shopt -s nullglob
           files=(release/*)
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "nenhum asset para publicar"
+            echo "no assets to publish"
             exit 0
           fi
           for f in "${files[@]}"; do
@@ -423,14 +468,14 @@ jobs:
                 ok=1
                 break
               fi
-              echo "falha ao subir ${name} (tentativa ${attempt}), aguardando"
+              echo "upload failed for ${name} (attempt ${attempt}), waiting before the next attempt"
               sleep $((attempt * 15))
             done
             if [ "$ok" -ne 1 ]; then
-              echo "falha definitiva ao subir ${name}"
+              echo "permanent upload failure for ${name}"
               exit 1
             fi
-            echo "asset publicado: ${name}"
+            echo "asset published: ${name}"
           done
 
       - name: Verify release (post-flight)
@@ -438,19 +483,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ls manifests/manifest-*.txt >/dev/null 2>&1 || {
-            echo "erro: nenhum manifest encontrado, nao e possivel verificar a release"
+            echo "error: no manifest found, unable to verify the release"
             exit 1
           }
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
           if [ ! -s /tmp/assets.txt ]; then
-            echo "erro: lista de assets vazia"
+            echo "error: asset list is empty"
             exit 1
           fi
           rc=0
           for arch in x86_64 aarch64; do
             cut -d' ' -f1 "manifests/manifest-${arch}.txt" | sort -u > "/tmp/pkg-list-${arch}.txt"
             if [ ! -s "/tmp/pkg-list-${arch}.txt" ]; then
-              echo "erro: lista de pacotes vazia para ${arch}, recusando rodar uma verificacao vazia"
+              echo "error: package list for ${arch} is empty, refusing to run an empty verification"
               exit 1
             fi
             while read -r pkg; do
@@ -458,44 +503,44 @@ jobs:
               count=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt || true)
               sigcount=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps\.sig2$" /tmp/assets.txt || true)
               if [ "$count" -gt 1 ]; then
-                echo "mais de uma versao de ${pkg} (${arch}) coexistindo na release:"
+                echo "more than one version of ${pkg} (${arch}) coexisting in the release:"
                 grep -E "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt
                 rc=1
               elif [ "$count" -eq 0 ]; then
                 if grep -h "^${pkg} " "manifests/manifest-${arch}.txt" | grep -q FAIL; then
-                  echo "aviso: ${pkg} (${arch}) ausente, build falhou nesta execucao"
+                  echo "warning: ${pkg} (${arch}) missing, the build failed in this run"
                 else
-                  echo "erro: ${pkg} (${arch}) ausente da release"
+                  echo "error: ${pkg} (${arch}) is missing from the release"
                   rc=1
                 fi
               fi
               if [ "$sigcount" -ne "$count" ]; then
-                echo "erro: assinaturas divergentes para ${pkg} (${arch}): ${sigcount} sig2 para ${count} pacotes"
+                echo "error: signature mismatch for ${pkg} (${arch}): ${sigcount} sig2 files for ${count} packages"
                 rc=1
               fi
             done < "/tmp/pkg-list-${arch}.txt"
           done
           for arch in x86_64 aarch64; do
             if ! grep -qx "${arch}-repodata" /tmp/assets.txt; then
-              echo "erro: ${arch}-repodata ausente da release"
+              echo "error: ${arch}-repodata is missing from the release"
               rc=1
             fi
           done
           if [ "$rc" -ne 0 ]; then
-            echo "pos-voo falhou: a release ficou em estado inconsistente"
+            echo "post-flight failed: the release is in an inconsistent state"
             exit 1
           fi
-          echo "pos-voo ok: uma versao por pacote/arquitetura, assinaturas e repodata presentes"
+          echo "post-flight ok: one version per package/architecture, signatures and repodata present"
 
       - name: Generate PACKAGES.md
         run: |
           ls manifests/manifest-*.txt >/dev/null 2>&1 || {
-            echo "erro: nenhum manifest encontrado em manifests/"
+            echo "error: no manifest found in manifests/"
             exit 1
           }
           cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-order.txt
           if [ ! -s /tmp/pkg-order.txt ]; then
-            echo "erro: lista de pacotes vazia, recusando gerar um PACKAGES.md vazio"
+            echo "error: package list is empty, refusing to generate an empty PACKAGES.md"
             exit 1
           fi
           {
