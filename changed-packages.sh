@@ -13,7 +13,6 @@ brave-nightly
 brave-origin
 brave-origin-beta
 brave-origin-nightly
-cromite
 helium
 thorium-browser
 thorium-browser-avx2
