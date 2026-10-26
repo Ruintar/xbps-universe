@@ -379,14 +379,14 @@ jobs:
 
       - name: Upload built packages
         if: steps.check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: built-packages-${{ matrix.arch }}
           path: ~/release/
           retention-days: 1
 
       - name: Upload manifest
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: manifest-${{ matrix.arch }}
           path: ~/manifest-${{ matrix.arch }}.txt
@@ -400,7 +400,7 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Checkout xbps-universe
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Evaluate publish mode
         id: mode
@@ -418,14 +418,14 @@ jobs:
 
       - name: Download built packages
         if: steps.mode.outputs.full == 'true'
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           pattern: built-packages-*
           path: release
           merge-multiple: true
 
       - name: Download manifests
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           pattern: manifest-*
           path: manifests
@@ -572,7 +572,7 @@ jobs:
           cat PACKAGES.md
 
       - name: Commit PACKAGES.md
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: "Update PACKAGES.md"
           file_pattern: PACKAGES.md
