@@ -23,7 +23,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - arch: x86_64
@@ -51,6 +50,25 @@ jobs:
           xbps-install -Syu xbps && xbps-install -yu
           xbps-install -y sudo bash curl git github-cli
           useradd -G xbuilder -M builder
+
+      # All pipeline state files (build queue, ghost/orphan lists, asset
+      # simulation lists, support logs) live in a job-scoped directory under
+      # RUNNER_TEMP instead of /tmp:
+      #   - RUNNER_TEMP is emptied at the start and end of every job, so runs
+      #     never inherit stale state from previous runs;
+      #   - the directory is created 0777 WITHOUT the sticky bit, so
+      #     fs.protected_regular never applies and root and builder can share
+      #     files regardless of which user created them (removes the /tmp
+      #     EACCES failure mode at the filesystem level).
+      # XBPS_STATE_DIR is exported to every later step of this job.
+      - name: Prepare state directory
+        run: |
+          : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
+          echo "XBPS_STATE_DIR=$RUNNER_TEMP/xbps-state" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/xbps-state"
+          chmod 0777 "$RUNNER_TEMP/xbps-state"
+          echo "state directory: $RUNNER_TEMP/xbps-state (0777, no sticky bit)"
+          echo "kernel fs.protected_regular=$(cat /proc/sys/fs/protected_regular 2>/dev/null || echo unavailable)"
 
       - name: Clone void-packages
         run: git clone --depth=1 --branch=master https://github.com/void-linux/void-packages
@@ -90,7 +108,7 @@ jobs:
         run: |
           chmod +x xbps-universe/changed-packages.sh
           cd void-packages
-          sudo -Eu builder env VOID_PACKAGES_DIR="." ARCH="${ARCH}" FORCE_REBUILD="${FORCE_REBUILD}" \
+          sudo -Eu builder env XBPS_STATE_DIR="${XBPS_STATE_DIR}" VOID_PACKAGES_DIR="." ARCH="${ARCH}" FORCE_REBUILD="${FORCE_REBUILD}" \
             bash ../xbps-universe/changed-packages.sh \
             "https://github.com/${REPO}/releases/latest/download"
 
@@ -99,8 +117,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -s /tmp/new_pkgs ]; then
-            echo "error: /tmp/new_pkgs is empty, aborting the purge as a safety measure"
+          if [ ! -s ${XBPS_STATE_DIR}/new_pkgs ]; then
+            echo "error: ${XBPS_STATE_DIR}/new_pkgs is empty, aborting the purge as a safety measure"
             exit 1
           fi
           if ! gh release view latest --repo "${REPO}" >/dev/null 2>&1; then
@@ -108,31 +126,31 @@ jobs:
             exit 0
           fi
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
-            > /tmp/assets-now.txt
+            > ${XBPS_STATE_DIR}/assets-now.txt
 
           # Packages known to the pipeline for this arch.
           # With force rebuild enabled, new_pkgs contains all of them.
-          sed 's/-[^-]*$//' /tmp/new_pkgs | sort -u > /tmp/known-pkgs.txt
+          sed 's/-[^-]*$//' ${XBPS_STATE_DIR}/new_pkgs | sort -u > ${XBPS_STATE_DIR}/known-pkgs.txt
 
           # Orphans: published assets for this arch whose package
           # is no longer tracked by the pipeline.
-          : > /tmp/orphan-pkgs.txt
-          for name in $(grep -E "\.${ARCH}\.xbps(\.sig2)?$" /tmp/assets-now.txt); do
+          : > ${XBPS_STATE_DIR}/orphan-pkgs.txt
+          for name in $(grep -E "\.${ARCH}\.xbps(\.sig2)?$" ${XBPS_STATE_DIR}/assets-now.txt); do
             pkg=$(echo "$name" | sed -E "s/\.${ARCH}\.xbps(\.sig2)?$//" | sed 's/-[^-]*$//')
-            if ! grep -qx "$pkg" /tmp/known-pkgs.txt; then
-              grep -qx "$pkg" /tmp/orphan-pkgs.txt || echo "$pkg" >> /tmp/orphan-pkgs.txt
+            if ! grep -qx "$pkg" ${XBPS_STATE_DIR}/known-pkgs.txt; then
+              grep -qx "$pkg" ${XBPS_STATE_DIR}/orphan-pkgs.txt || echo "$pkg" >> ${XBPS_STATE_DIR}/orphan-pkgs.txt
             fi
           done
 
-          if [ ! -s /tmp/orphan-pkgs.txt ]; then
+          if [ ! -s ${XBPS_STATE_DIR}/orphan-pkgs.txt ]; then
             echo "purge ok (${ARCH}): no orphaned packages in the release"
             exit 0
           fi
 
           echo "purge (${ARCH}): packages in the release no longer tracked by the pipeline:"
-          cat /tmp/orphan-pkgs.txt
-          for pkg in $(cat /tmp/orphan-pkgs.txt); do
-            for name in $(grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" /tmp/assets-now.txt); do
+          cat ${XBPS_STATE_DIR}/orphan-pkgs.txt
+          for pkg in $(cat ${XBPS_STATE_DIR}/orphan-pkgs.txt); do
+            for name in $(grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" ${XBPS_STATE_DIR}/assets-now.txt); do
               echo "deleting orphaned asset: ${name}"
               gh release delete-asset latest "${name}" --repo "${REPO}" --yes || true
             done
@@ -144,40 +162,43 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
-            > /tmp/release-assets.txt 2>/dev/null || : > /tmp/release-assets.txt
+            > ${XBPS_STATE_DIR}/release-assets.txt 2>/dev/null || : > ${XBPS_STATE_DIR}/release-assets.txt
 
-          : > /tmp/ghost-pkgs.txt
+          : > ${XBPS_STATE_DIR}/ghost-pkgs.txt
           while read -r line; do
             if [ -z "$line" ]; then continue; fi
             pkg=$(echo "$line" | sed 's/-[^-]*$//')
             ver=$(echo "$line" | sed "s/^${pkg}-//")
-            if ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps" /tmp/release-assets.txt \
-               || ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps.sig2" /tmp/release-assets.txt; then
+            if ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps" ${XBPS_STATE_DIR}/release-assets.txt \
+               || ! grep -Fxq "${pkg}-${ver}.${ARCH}.xbps.sig2" ${XBPS_STATE_DIR}/release-assets.txt; then
               echo "${pkg}: version ${ver} does not exist as a real ${ARCH} asset in the release, forcing rebuild"
-              echo "$pkg" >> /tmp/ghost-pkgs.txt
+              echo "$pkg" >> ${XBPS_STATE_DIR}/ghost-pkgs.txt
             fi
-          done < /tmp/new_pkgs
+          done < ${XBPS_STATE_DIR}/new_pkgs
 
-          if [ -s /tmp/ghost-pkgs.txt ]; then
-            while read -r pkg; do
-              if [ -z "$pkg" ]; then continue; fi
-              if ! grep -qx "$pkg" /tmp/pkgs-to-build.txt; then
-                echo "$pkg" >> /tmp/pkgs-to-build.txt
-              fi
-            done < /tmp/ghost-pkgs.txt
+          if [ -s ${XBPS_STATE_DIR}/ghost-pkgs.txt ]; then
+            # Rebuild the queue as a fresh root-owned file instead of appending
+            # in place: the swap is an atomic rename inside the state directory
+            # and the queue ends the step with a single consistent owner, no
+            # matter which user produced the previous file.
+            { grep -vxF -f ${XBPS_STATE_DIR}/ghost-pkgs.txt ${XBPS_STATE_DIR}/pkgs-to-build.txt || true
+              cat ${XBPS_STATE_DIR}/ghost-pkgs.txt
+            } > ${XBPS_STATE_DIR}/queue-merged.txt
+            rm -f ${XBPS_STATE_DIR}/pkgs-to-build.txt
+            mv ${XBPS_STATE_DIR}/queue-merged.txt ${XBPS_STATE_DIR}/pkgs-to-build.txt
             echo "packages added by reconciliation (${ARCH}):"
-            cat /tmp/ghost-pkgs.txt
+            cat ${XBPS_STATE_DIR}/ghost-pkgs.txt
           else
             echo "reconciliation ok (${ARCH}): every template has a matching real asset"
           fi
           echo "final build queue (${ARCH}):"
-          cat /tmp/pkgs-to-build.txt
+          cat ${XBPS_STATE_DIR}/pkgs-to-build.txt
 
       - name: Check for pending work
         id: check
         run: |
-          : > /tmp/failed-pkgs.txt
-          if [ -s /tmp/pkgs-to-build.txt ]; then
+          : > ${XBPS_STATE_DIR}/failed-pkgs.txt
+          if [ -s ${XBPS_STATE_DIR}/pkgs-to-build.txt ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "skip_${ARCH}=false" >> "$GITHUB_OUTPUT"
             echo "there are packages to build in this run (${ARCH}), full pipeline"
@@ -193,27 +214,27 @@ jobs:
           mkdir -p ~/packages ~/hostdir
           chown -R builder:builder ~/packages ~/hostdir
           cd void-packages
-          if [ -s /tmp/pkgs-to-build.txt ]; then
+          if [ -s ${XBPS_STATE_DIR}/pkgs-to-build.txt ]; then
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
               if sudo -Eu builder ./xbps-src -j"$(nproc)" -s -H ~/hostdir pkg "$pkg"; then
                 n=$(find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.${ARCH}.xbps" | wc -l)
                 if [ "$n" -eq 0 ]; then
                   echo "no ${ARCH} binary found for ${pkg} after the build"
-                  echo "$pkg" >> /tmp/failed-pkgs.txt
+                  echo "$pkg" >> ${XBPS_STATE_DIR}/failed-pkgs.txt
                 else
                   find ~/hostdir/binpkgs -name "${pkg}-[0-9]*.${ARCH}.xbps" -exec cp {} ~/packages/ \;
                 fi
               else
                 echo "build failed: ${pkg}"
-                echo "$pkg" >> /tmp/failed-pkgs.txt
+                echo "$pkg" >> ${XBPS_STATE_DIR}/failed-pkgs.txt
               fi
-            done < /tmp/pkgs-to-build.txt
+            done < ${XBPS_STATE_DIR}/pkgs-to-build.txt
           else
             echo "no packages to build in this run"
           fi
           echo "packages built: $(ls -1 ~/packages/*.${ARCH}.xbps 2>/dev/null | wc -l)"
-          echo "failed packages: $(wc -l < /tmp/failed-pkgs.txt)"
+          echo "failed packages: $(wc -l < ${XBPS_STATE_DIR}/failed-pkgs.txt)"
 
       - name: Download currently published packages
         if: steps.check.outputs.skip != 'true'
@@ -253,15 +274,15 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           rm -f ~/all_packages/*.sig2
-          if [ -s /tmp/pkgs-to-build.txt ]; then
+          if [ -s ${XBPS_STATE_DIR}/pkgs-to-build.txt ]; then
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
-              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then
+              if grep -qx "$pkg" ${XBPS_STATE_DIR}/failed-pkgs.txt; then
                 echo "keeping the old assets for ${pkg} (build failed)"
                 continue
               fi
               rm -f ~/all_packages/"${pkg}"-[0-9]*."${ARCH}".xbps
-            done < /tmp/pkgs-to-build.txt
+            done < ${XBPS_STATE_DIR}/pkgs-to-build.txt
           fi
           cp ~/all_packages/*."${ARCH}".xbps ~/packages/ 2>/dev/null || true
           echo "total ${ARCH} packages to index: $(ls -1 ~/packages/*."${ARCH}".xbps | wc -l)"
@@ -278,7 +299,7 @@ jobs:
           fi
           cd ~/packages
           xbps-rindex -a *."${ARCH}".xbps
-          temp_key=$(mktemp)
+          temp_key=$(mktemp "${XBPS_STATE_DIR}/privkey-XXXXXX")
           printf '%s\n' "$PRIVATE_PEM" > "$temp_key"
           chmod 600 "$temp_key"
           xbps-rindex --privkey "$temp_key" --sign --signedby "Ruintar (xbps-universe CI)" .
@@ -292,46 +313,46 @@ jobs:
         run: |
           mkdir -p ~/release
           cp ~/packages/"${ARCH}"-repodata ~/release/
-          if [ -s /tmp/pkgs-to-build.txt ]; then
+          if [ -s ${XBPS_STATE_DIR}/pkgs-to-build.txt ]; then
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
-              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
+              if grep -qx "$pkg" ${XBPS_STATE_DIR}/failed-pkgs.txt; then continue; fi
               if ! ls ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps >/dev/null 2>&1; then
                 echo "${pkg} (${ARCH}) binary missing after the build, marking it as FAIL to protect the published asset"
-                echo "$pkg" >> /tmp/failed-pkgs.txt
+                echo "$pkg" >> ${XBPS_STATE_DIR}/failed-pkgs.txt
                 continue
               fi
               cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps ~/release/
               cp ~/packages/"${pkg}"-[0-9]*."${ARCH}".xbps.sig2 ~/release/ 2>/dev/null || true
-            done < /tmp/pkgs-to-build.txt
+            done < ${XBPS_STATE_DIR}/pkgs-to-build.txt
           fi
 
-          (cd ~/release && ls -1) > /tmp/new-assets.txt
+          (cd ~/release && ls -1) > ${XBPS_STATE_DIR}/new-assets.txt
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
-            > /tmp/current-assets.txt 2>/dev/null || : > /tmp/current-assets.txt
-          cp /tmp/current-assets.txt /tmp/simulated-assets.txt
+            > ${XBPS_STATE_DIR}/current-assets.txt 2>/dev/null || : > ${XBPS_STATE_DIR}/current-assets.txt
+          cp ${XBPS_STATE_DIR}/current-assets.txt ${XBPS_STATE_DIR}/simulated-assets.txt
 
-          if [ -s /tmp/pkgs-to-build.txt ]; then
+          if [ -s ${XBPS_STATE_DIR}/pkgs-to-build.txt ]; then
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
-              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
-              grep -vE "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" /tmp/simulated-assets.txt \
-                > /tmp/sim-tmp && mv /tmp/sim-tmp /tmp/simulated-assets.txt
-            done < /tmp/pkgs-to-build.txt
+              if grep -qx "$pkg" ${XBPS_STATE_DIR}/failed-pkgs.txt; then continue; fi
+              grep -vE "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" ${XBPS_STATE_DIR}/simulated-assets.txt \
+                > ${XBPS_STATE_DIR}/sim-tmp && mv ${XBPS_STATE_DIR}/sim-tmp ${XBPS_STATE_DIR}/simulated-assets.txt
+            done < ${XBPS_STATE_DIR}/pkgs-to-build.txt
           fi
-          cat /tmp/new-assets.txt >> /tmp/simulated-assets.txt
+          cat ${XBPS_STATE_DIR}/new-assets.txt >> ${XBPS_STATE_DIR}/simulated-assets.txt
 
-          sed 's/-[^-]*$//' /tmp/new_pkgs | sort -u > /tmp/pkg-list.txt
+          sed 's/-[^-]*$//' ${XBPS_STATE_DIR}/new_pkgs | sort -u > ${XBPS_STATE_DIR}/pkg-list.txt
           rc=0
           while read -r pkg; do
             if [ -z "$pkg" ]; then continue; fi
-            count=$(grep -cE "^${pkg}-[0-9].*\.${ARCH}\.xbps$" /tmp/simulated-assets.txt || true)
+            count=$(grep -cE "^${pkg}-[0-9].*\.${ARCH}\.xbps$" ${XBPS_STATE_DIR}/simulated-assets.txt || true)
             if [ "$count" -gt 1 ]; then
               echo "a duplicate would be created for ${pkg} (${ARCH}):"
-              grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps$" /tmp/simulated-assets.txt
+              grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps$" ${XBPS_STATE_DIR}/simulated-assets.txt
               rc=1
             fi
-          done < /tmp/pkg-list.txt
+          done < ${XBPS_STATE_DIR}/pkg-list.txt
           if [ "$rc" -ne 0 ]; then
             echo "pre-flight aborted: the release would end up with more than one version of the same package/architecture"
             exit 1
@@ -347,17 +368,17 @@ jobs:
             echo "release latest does not exist yet, nothing to remove"
             exit 0
           fi
-          if [ -s /tmp/pkgs-to-build.txt ]; then
+          if [ -s ${XBPS_STATE_DIR}/pkgs-to-build.txt ]; then
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
-              if grep -qx "$pkg" /tmp/failed-pkgs.txt; then continue; fi
+              if grep -qx "$pkg" ${XBPS_STATE_DIR}/failed-pkgs.txt; then continue; fi
               for name in $(gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
                   | grep -E "^${pkg}-[0-9].*\.${ARCH}\.xbps(\.sig2)?$" \
-                  | grep -vxF -f /tmp/new-assets.txt); do
+                  | grep -vxF -f ${XBPS_STATE_DIR}/new-assets.txt); do
                 echo "deleting stale asset: ${name}"
                 gh release delete-asset latest "$name" --repo "${REPO}" --yes || true
               done
-            done < /tmp/pkgs-to-build.txt
+            done < ${XBPS_STATE_DIR}/pkgs-to-build.txt
           fi
           gh release delete-asset latest "${ARCH}-repodata" --repo "${REPO}" --yes || true
 
@@ -368,13 +389,13 @@ jobs:
             if [ -z "$line" ]; then continue; fi
             pkg=$(echo "$line" | sed 's/-[^-]*$//')
             ver=$(echo "$line" | sed "s/^${pkg}-//")
-            if grep -qx "$pkg" /tmp/failed-pkgs.txt; then
+            if grep -qx "$pkg" ${XBPS_STATE_DIR}/failed-pkgs.txt; then
               status=FAIL
             else
               status=OK
             fi
             echo "$pkg $ver $status" >> ~/manifest-"${ARCH}".txt
-          done < /tmp/new_pkgs
+          done < ${XBPS_STATE_DIR}/new_pkgs
           cat ~/manifest-"${ARCH}".txt
 
       - name: Upload built packages
@@ -401,6 +422,15 @@ jobs:
     steps:
       - name: Checkout xbps-universe
         uses: actions/checkout@v7
+
+      # Host-side job: state files also live in RUNNER_TEMP, keeping the whole
+      # pipeline free of /tmp paths. Single-user job, so no permission setup
+      # is needed here.
+      - name: Prepare state directory
+        run: |
+          : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
+          echo "XBPS_STATE_DIR=$RUNNER_TEMP/xbps-state" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/xbps-state"
 
       - name: Evaluate publish mode
         id: mode
@@ -486,25 +516,25 @@ jobs:
             echo "error: no manifest found, unable to verify the release"
             exit 1
           }
-          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
-          if [ ! -s /tmp/assets.txt ]; then
+          gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' | sort > ${XBPS_STATE_DIR}/assets.txt
+          if [ ! -s ${XBPS_STATE_DIR}/assets.txt ]; then
             echo "error: asset list is empty"
             exit 1
           fi
           rc=0
           for arch in x86_64 aarch64; do
-            cut -d' ' -f1 "manifests/manifest-${arch}.txt" | sort -u > "/tmp/pkg-list-${arch}.txt"
-            if [ ! -s "/tmp/pkg-list-${arch}.txt" ]; then
+            cut -d' ' -f1 "manifests/manifest-${arch}.txt" | sort -u > "${XBPS_STATE_DIR}/pkg-list-${arch}.txt"
+            if [ ! -s "${XBPS_STATE_DIR}/pkg-list-${arch}.txt" ]; then
               echo "error: package list for ${arch} is empty, refusing to run an empty verification"
               exit 1
             fi
             while read -r pkg; do
               if [ -z "$pkg" ]; then continue; fi
-              count=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt || true)
-              sigcount=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps\.sig2$" /tmp/assets.txt || true)
+              count=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps$" ${XBPS_STATE_DIR}/assets.txt || true)
+              sigcount=$(grep -cE "^${pkg}-[0-9].*\.${arch}\.xbps\.sig2$" ${XBPS_STATE_DIR}/assets.txt || true)
               if [ "$count" -gt 1 ]; then
                 echo "more than one version of ${pkg} (${arch}) coexisting in the release:"
-                grep -E "^${pkg}-[0-9].*\.${arch}\.xbps$" /tmp/assets.txt
+                grep -E "^${pkg}-[0-9].*\.${arch}\.xbps$" ${XBPS_STATE_DIR}/assets.txt
                 rc=1
               elif [ "$count" -eq 0 ]; then
                 if grep -h "^${pkg} " "manifests/manifest-${arch}.txt" | grep -q FAIL; then
@@ -518,10 +548,10 @@ jobs:
                 echo "error: signature mismatch for ${pkg} (${arch}): ${sigcount} sig2 files for ${count} packages"
                 rc=1
               fi
-            done < "/tmp/pkg-list-${arch}.txt"
+            done < "${XBPS_STATE_DIR}/pkg-list-${arch}.txt"
           done
           for arch in x86_64 aarch64; do
-            if ! grep -qx "${arch}-repodata" /tmp/assets.txt; then
+            if ! grep -qx "${arch}-repodata" ${XBPS_STATE_DIR}/assets.txt; then
               echo "error: ${arch}-repodata is missing from the release"
               rc=1
             fi
@@ -538,8 +568,8 @@ jobs:
             echo "error: no manifest found in manifests/"
             exit 1
           }
-          cut -d' ' -f1 manifests/manifest-*.txt | sort -u > /tmp/pkg-order.txt
-          if [ ! -s /tmp/pkg-order.txt ]; then
+          cut -d' ' -f1 manifests/manifest-*.txt | sort -u > ${XBPS_STATE_DIR}/pkg-order.txt
+          if [ ! -s ${XBPS_STATE_DIR}/pkg-order.txt ]; then
             echo "error: package list is empty, refusing to generate an empty PACKAGES.md"
             exit 1
           fi
@@ -567,7 +597,7 @@ jobs:
                 fi
               fi
               echo "| ${pkg} | ${cell_aarch64} | ${cell_x86_64} |"
-            done < /tmp/pkg-order.txt
+            done < ${XBPS_STATE_DIR}/pkg-order.txt
           } > PACKAGES.md
           cat PACKAGES.md
 
