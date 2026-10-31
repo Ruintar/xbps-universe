@@ -4,13 +4,6 @@ set -eu
 
 VOID_PACKAGES_DIR="${VOID_PACKAGES_DIR:-void-packages}"
 
-# Base directory for short-lived scratch space (multirepo clone scratch).
-# The workflow sets XBPS_STATE_DIR pointing to $RUNNER_TEMP/xbps-state,
-# created with 0777 and no sticky bit; outside the workflow (local test),
-# it falls back to RUNNER_TEMP and finally /tmp.
-# This script runs entirely as root on CI, so fs.protected_regular does
-# not affect it; this migration is standardization (all pipeline scratch
-# in one place), not a bug fix.
 STATE_DIR="${XBPS_STATE_DIR:-${RUNNER_TEMP:-/tmp}}"
 mkdir -p "$STATE_DIR" 2>/dev/null || :
 if [ ! -w "$STATE_DIR" ] || [ ! -x "$STATE_DIR" ]; then
@@ -51,9 +44,6 @@ for entry in $MULTIREPOS; do
   url=$(echo "$entry" | cut -d: -f2-3)
 
   tmp=$(mktemp -d "${STATE_DIR}/populate-${name}-XXXXXX")
-  # With set -e, any failure in the block below (e.g. a broken clone)
-  # aborts the script; the trap ensures the clone scratch is not left
-  # orphaned in the state directory.
   trap 'rm -rf "$tmp"' EXIT
   git clone --quiet --depth=1 -b "$branch" "$url" "$tmp"
   for d in "$tmp"/*/; do

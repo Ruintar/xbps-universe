@@ -6,13 +6,6 @@ VOID_PACKAGES_DIR="${VOID_PACKAGES_DIR:-void-packages}"
 ARCH="${ARCH:-x86_64}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 
-# Pipeline state directory (build queue, new/old/changed lists,
-# sort-dependencies log). The workflow sets XBPS_STATE_DIR pointing to
-# $RUNNER_TEMP/xbps-state, created with 0777 and NO sticky bit: without
-# the sticky bit, fs.protected_regular does not apply, so builder (this
-# script) and root (purge/reconcile in build.yaml) share the files with
-# no ownership conflict (eliminates the /tmp EACCES incident). The
-# fallbacks below exist only for local test runs on single-user machines.
 STATE_DIR="${XBPS_STATE_DIR:-${RUNNER_TEMP:-/tmp}/xbps-state}"
 mkdir -p "$STATE_DIR" 2>/dev/null || :
 if [ ! -w "$STATE_DIR" ] || [ ! -x "$STATE_DIR" ]; then

@@ -51,16 +51,6 @@ jobs:
           xbps-install -y sudo bash curl git github-cli
           useradd -G xbuilder -M builder
 
-      # All pipeline state files (build queue, ghost/orphan lists, asset
-      # simulation lists, support logs) live in a job-scoped directory under
-      # RUNNER_TEMP instead of /tmp:
-      #   - RUNNER_TEMP is emptied at the start and end of every job, so runs
-      #     never inherit stale state from previous runs;
-      #   - the directory is created 0777 WITHOUT the sticky bit, so
-      #     fs.protected_regular never applies and root and builder can share
-      #     files regardless of which user created them (removes the /tmp
-      #     EACCES failure mode at the filesystem level).
-      # XBPS_STATE_DIR is exported to every later step of this job.
       - name: Prepare state directory
         run: |
           : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
@@ -423,9 +413,6 @@ jobs:
       - name: Checkout xbps-universe
         uses: actions/checkout@v7
 
-      # Host-side job: state files also live in RUNNER_TEMP, keeping the whole
-      # pipeline free of /tmp paths. Single-user job, so no permission setup
-      # is needed here.
       - name: Prepare state directory
         run: |
           : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
