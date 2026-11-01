@@ -46,9 +46,71 @@ jobs:
       - name: Prepare container
         run: |
           mkdir -p /etc/xbps.d && cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
-          sed -i 's|repo-default|repo-ci|g' /etc/xbps.d/*-repository-*.conf
-          xbps-install -Syu xbps && xbps-install -yu
-          xbps-install -y sudo bash curl git github-cli
+
+          # Repository fallback chain: the first entry whose sync and package
+          # installation succeed wins; later entries are only tried when the
+          # previous one is unreachable. The arch-specific path (/current for
+          # x86_64, /current/aarch64 for aarch64) comes from the image
+          # configuration, so only the entry is swapped below.
+          #
+          #   1. repo-default.voidlinux.org  canonical stable repository, the
+          #                                  host shipped with the image;
+          #   2. repo-fastly.voidlinux.org   stable repository on the Fastly
+          #                                  global CDN (Void-run, Tier 1);
+          #   3. mirror.linux.ec/voidlinux   Tier 2 mirror in Quito, Ecuador,
+          #                                  serving both x86_64 and aarch64
+          #                                  (repodata verified), well synced.
+          #
+          # Entries carry their own path prefix: Void-run hosts serve the
+          # repository at the root, while Tier 2 mirrors usually nest it under
+          # /voidlinux. Always copy the exact base URL from
+          # https://xmirror.voidlinux.org when adding or replacing an entry.
+          # Extra Tier 1 candidates if ever needed: repo-de.voidlinux.org
+          # (Frankfurt, 1-minute sync when this chain was written) and
+          # mirrors.summithq.com/voidlinux (Chicago); repo-fi.voidlinux.org
+          # (Helsinki) was unreachable at that time. repo-ci.voidlinux.org was
+          # dropped on purpose: it is Void's CI repository, the entry with the
+          # worst availability record and no guarantee whatsoever.
+          repo_hosts="repo-default.voidlinux.org repo-fastly.voidlinux.org mirror.linux.ec/voidlinux"
+
+          repo_conf=""
+          for conf in /etc/xbps.d/*-repository-*.conf; do
+            if [ -f "$conf" ]; then
+              repo_conf="$conf"
+              break
+            fi
+          done
+          if [ -z "$repo_conf" ]; then
+            echo "error: no repository configuration found in /etc/xbps.d" >&2
+            exit 1
+          fi
+
+          base_url=$(sed -n 's/^repository=//p' "$repo_conf" | head -n 1)
+          base_path=${base_url#*://}
+          base_path=${base_path#*/}
+          if [ -z "$base_path" ]; then
+            echo "error: could not determine the repository path from $repo_conf" >&2
+            exit 1
+          fi
+          echo "==> repository path from image configuration: ${base_path}"
+
+          repo_ready=""
+          for host in $repo_hosts; do
+            echo "==> trying repository host: ${host}"
+            sed -i "s|^repository=.*|repository=https://${host}/${base_path}|" "$repo_conf"
+            if xbps-install -Syu xbps && xbps-install -yu && xbps-install -y sudo bash curl git github-cli; then
+              echo "==> repository host ${host}: sync and tool installation succeeded"
+              repo_ready=1
+              break
+            fi
+            echo "==> repository host ${host} is unreachable, falling back to the next one" >&2
+          done
+
+          if [ -z "$repo_ready" ]; then
+            echo "error: all repository hosts failed: ${repo_hosts}" >&2
+            exit 1
+          fi
+
           useradd -G xbuilder -M builder
 
       - name: Prepare state directory
@@ -413,6 +475,9 @@ jobs:
       - name: Checkout xbps-universe
         uses: actions/checkout@v7
 
+      # Host-side job: state files also live in RUNNER_TEMP, keeping the whole
+      # pipeline free of /tmp paths. Single-user job, so no permission setup
+      # is needed here.
       - name: Prepare state directory
         run: |
           : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
