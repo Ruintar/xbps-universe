@@ -47,41 +47,6 @@ jobs:
         run: |
           mkdir -p /etc/xbps.d && cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
 
-          # Repository fallback chain: the first entry whose sync and package
-          # installation succeed wins; later entries are only tried when the
-          # previous one is unreachable. The arch-specific path (/current for
-          # x86_64, /current/aarch64 for aarch64) comes from the image
-          # configuration, so only the entry is swapped below. The winning
-          # entry is exported as VOID_REPO_HOST and reused by the masterdir
-          # repository pool (Prepare masterdir step), so the build phase never
-          # falls back to repo-default either.
-          #
-          #   1. repo-de.voidlinux.org     Tier 1 mirror in Frankfurt,
-          #                                  Germany, syncing every few
-          #                                  minutes from the build servers;
-          #   2. repo-fastly.voidlinux.org  stable repository on the Fastly
-          #                                  global CDN (Void-run, Tier 1);
-          #   3. mirror.linux.ec/voidlinux  Tier 2 mirror in Quito, Ecuador,
-          #                                  serving both x86_64 and aarch64
-          #                                  (repodata verified), well synced.
-          #
-          # repo-default.voidlinux.org, the host shipped with the image, was
-          # dropped from the chain on purpose: it is slow in practice, so
-          # repo-de (Frankfurt) took the first slot. The path derivation
-          # below still reads the image configuration, which keeps pointing
-          # at repo-default; only the host is overridden with the entries
-          # above.
-          #
-          # Entries carry their own path prefix: Void-run hosts serve the
-          # repository at the root, while Tier 2 mirrors usually nest it under
-          # /voidlinux. Always copy the exact base URL from
-          # https://xmirror.voidlinux.org when adding or replacing an entry.
-          # Extra Tier 1 candidates if ever needed:
-          # mirrors.summithq.com/voidlinux (Chicago); repo-fi.voidlinux.org
-          # (Helsinki) was unreachable when this chain was written.
-          # repo-ci.voidlinux.org was dropped on purpose: it is Void's CI
-          # repository, the entry with the worst availability record and no
-          # guarantee whatsoever.
           repo_hosts="repo-de.voidlinux.org repo-fastly.voidlinux.org mirror.linux.ec/voidlinux"
 
           repo_conf=""
@@ -125,16 +90,6 @@ jobs:
 
           useradd -G xbuilder -M builder
 
-      # All pipeline state files (build queue, ghost/orphan lists, asset
-      # simulation lists, support logs) live in a job-scoped directory under
-      # RUNNER_TEMP instead of /tmp:
-      #   - RUNNER_TEMP is emptied at the start and end of every job, so runs
-      #     never inherit stale state from previous runs;
-      #   - the directory is created 0777 WITHOUT the sticky bit, so
-      #     fs.protected_regular never applies and root and builder can share
-      #     files regardless of which user created them (removes the /tmp
-      #     EACCES failure mode at the filesystem level).
-      # XBPS_STATE_DIR is exported to every later step of this job.
       - name: Prepare state directory
         run: |
           : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
@@ -173,17 +128,6 @@ jobs:
           else
             echo "release latest does not exist yet, continuing without the extra repository"
           fi
-          # Rewrite the masterdir repository pool to the host elected by the
-          # fallback chain in the Prepare container step. void-packages ships
-          # repos-remote*.conf pointing at repo-default.voidlinux.org (slow),
-          # and common/travis/set_mirror.sh used to rewrite them to
-          # repo-ci.voidlinux.org, hardcoded with no override - the very host
-          # whose outage motivated the chain - so that helper is not called
-          # anymore. VOID_REPO_HOST carries its own path prefix for Tier 2
-          # mirrors and the arch handling of the original URLs is preserved.
-          # Caveat: the Ecuador mirror does not carry the debug sub-repository;
-          # in that last-resort scenario xbps prints a sync error for that
-          # member, but no package needed by the builds lives there.
           : "${VOID_REPO_HOST:?VOID_REPO_HOST is not set}"
           sed -i "s|repo-default\.voidlinux\.org|${VOID_REPO_HOST}|g" etc/xbps.d/repos-remote*.conf
           chown -R builder:builder .
@@ -214,12 +158,8 @@ jobs:
           gh release view latest --repo "${REPO}" --json assets --jq '.assets[].name' \
             > ${XBPS_STATE_DIR}/assets-now.txt
 
-          # Packages known to the pipeline for this arch.
-          # With force rebuild enabled, new_pkgs contains all of them.
           sed 's/-[^-]*$//' ${XBPS_STATE_DIR}/new_pkgs | sort -u > ${XBPS_STATE_DIR}/known-pkgs.txt
 
-          # Orphans: published assets for this arch whose package
-          # is no longer tracked by the pipeline.
           : > ${XBPS_STATE_DIR}/orphan-pkgs.txt
           for name in $(grep -E "\.${ARCH}\.xbps(\.sig2)?$" ${XBPS_STATE_DIR}/assets-now.txt); do
             pkg=$(echo "$name" | sed -E "s/\.${ARCH}\.xbps(\.sig2)?$//" | sed 's/-[^-]*$//')
@@ -263,10 +203,6 @@ jobs:
           done < ${XBPS_STATE_DIR}/new_pkgs
 
           if [ -s ${XBPS_STATE_DIR}/ghost-pkgs.txt ]; then
-            # Rebuild the queue as a fresh root-owned file instead of appending
-            # in place: the swap is an atomic rename inside the state directory
-            # and the queue ends the step with a single consistent owner, no
-            # matter which user produced the previous file.
             { grep -vxF -f ${XBPS_STATE_DIR}/ghost-pkgs.txt ${XBPS_STATE_DIR}/pkgs-to-build.txt || true
               cat ${XBPS_STATE_DIR}/ghost-pkgs.txt
             } > ${XBPS_STATE_DIR}/queue-merged.txt
@@ -509,9 +445,6 @@ jobs:
       - name: Checkout xbps-universe
         uses: actions/checkout@v7
 
-      # Host-side job: state files also live in RUNNER_TEMP, keeping the whole
-      # pipeline free of /tmp paths. Single-user job, so no permission setup
-      # is needed here.
       - name: Prepare state directory
         run: |
           : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
