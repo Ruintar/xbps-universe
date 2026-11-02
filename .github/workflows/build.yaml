@@ -51,7 +51,10 @@ jobs:
           # installation succeed wins; later entries are only tried when the
           # previous one is unreachable. The arch-specific path (/current for
           # x86_64, /current/aarch64 for aarch64) comes from the image
-          # configuration, so only the entry is swapped below.
+          # configuration, so only the entry is swapped below. The winning
+          # entry is exported as VOID_REPO_HOST and reused by the masterdir
+          # repository pool (Prepare masterdir step), so the build phase never
+          # falls back to repo-default either.
           #
           #   1. repo-de.voidlinux.org     Tier 1 mirror in Frankfurt,
           #                                  Germany, syncing every few
@@ -108,6 +111,7 @@ jobs:
             sed -i "s|^repository=.*|repository=https://${host}/${base_path}|" "$repo_conf"
             if xbps-install -Syu xbps && xbps-install -yu && xbps-install -y sudo bash curl git github-cli; then
               echo "==> repository host ${host}: sync and tool installation succeeded"
+              echo "VOID_REPO_HOST=${host}" >> "$GITHUB_ENV"
               repo_ready=1
               break
             fi
@@ -121,6 +125,16 @@ jobs:
 
           useradd -G xbuilder -M builder
 
+      # All pipeline state files (build queue, ghost/orphan lists, asset
+      # simulation lists, support logs) live in a job-scoped directory under
+      # RUNNER_TEMP instead of /tmp:
+      #   - RUNNER_TEMP is emptied at the start and end of every job, so runs
+      #     never inherit stale state from previous runs;
+      #   - the directory is created 0777 WITHOUT the sticky bit, so
+      #     fs.protected_regular never applies and root and builder can share
+      #     files regardless of which user created them (removes the /tmp
+      #     EACCES failure mode at the filesystem level).
+      # XBPS_STATE_DIR is exported to every later step of this job.
       - name: Prepare state directory
         run: |
           : "${RUNNER_TEMP:?RUNNER_TEMP is not set}"
@@ -159,8 +173,20 @@ jobs:
           else
             echo "release latest does not exist yet, continuing without the extra repository"
           fi
+          # Rewrite the masterdir repository pool to the host elected by the
+          # fallback chain in the Prepare container step. void-packages ships
+          # repos-remote*.conf pointing at repo-default.voidlinux.org (slow),
+          # and common/travis/set_mirror.sh used to rewrite them to
+          # repo-ci.voidlinux.org, hardcoded with no override - the very host
+          # whose outage motivated the chain - so that helper is not called
+          # anymore. VOID_REPO_HOST carries its own path prefix for Tier 2
+          # mirrors and the arch handling of the original URLs is preserved.
+          # Caveat: the Ecuador mirror does not carry the debug sub-repository;
+          # in that last-resort scenario xbps prints a sync error for that
+          # member, but no package needed by the builds lives there.
+          : "${VOID_REPO_HOST:?VOID_REPO_HOST is not set}"
+          sed -i "s|repo-default\.voidlinux\.org|${VOID_REPO_HOST}|g" etc/xbps.d/repos-remote*.conf
           chown -R builder:builder .
-          sudo -Eu builder common/travis/set_mirror.sh
           sudo -Eu builder common/travis/prepare.sh
           common/travis/fetch-xtools.sh
 
