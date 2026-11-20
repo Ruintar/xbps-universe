@@ -2,15 +2,15 @@
 |---|---|---|
 | brave | ✅ 1.100.58_1 | ✅ 1.100.58_1 |
 | brave-beta | ✅ 1.101.52_1 | ✅ 1.101.52_1 |
-| brave-nightly | ✅ 1.102.18_1 | ✅ 1.102.18_1 |
+| brave-nightly | ✅ 1.102.22_1 | ✅ 1.102.22_1 |
 | brave-origin | ✅ 1.100.58_1 | ✅ 1.100.58_1 |
 | brave-origin-beta | ✅ 1.101.52_1 | ✅ 1.101.52_1 |
-| brave-origin-nightly | ✅ 1.102.18_1 | ✅ 1.102.18_1 |
+| brave-origin-nightly | ✅ 1.102.22_1 | ✅ 1.102.22_1 |
 | helium | ✅ 0.22.1.1_1 | ✅ 0.22.1.1_1 |
-| thorium-browser | ✅ 156.0.8078.80_1 | ✅ 156.0.8078.80_1 |
-| thorium-browser-avx2 | - | ✅ 156.0.8078.80_1 |
-| thorium-browser-avx512 | - | ✅ 156.0.8078.80_1 |
-| thorium-browser-sse3 | - | ✅ 156.0.8078.80_1 |
-| thorium-browser-sse4 | - | ✅ 156.0.8078.80_1 |
+| thorium-browser | ✅ 158.0.8127.41_1 | ✅ 158.0.8127.41_1 |
+| thorium-browser-avx2 | - | ✅ 158.0.8127.41_1 |
+| thorium-browser-avx512 | - | ✅ 158.0.8127.41_1 |
+| thorium-browser-sse3 | - | ✅ 158.0.8127.41_1 |
+| thorium-browser-sse4 | - | ✅ 158.0.8127.41_1 |
 | vivaldi | ✅ 8.3.4191.45+1_1 | ✅ 8.3.4191.45+1_1 |
 | vivaldi-snapshot | ✅ 8.4.4226.3+1_1 | ✅ 8.4.4226.3+1_1 |
